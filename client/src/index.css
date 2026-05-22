@@ -1,0 +1,140 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+/* Theme Configuration */
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Outfit', sans-serif;
+
+  --color-brand-50: #fff9f2;
+  --color-brand-100: #ffeedb;
+  --color-brand-200: #ffd9b3;
+  --color-brand-300: #ffbc7d;
+  --color-brand-400: #ff9447;
+  --color-brand-500: #ff701a;
+  --color-brand-600: #f0540a;
+  --color-brand-700: #c7400a;
+  --color-brand-800: #9e340f;
+  --color-brand-900: #7f2d12;
+  --color-brand-950: #451307;
+
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.5rem;
+  --radius-3xl: 2rem;
+
+  --shadow-premium: 0 10px 40px -10px rgba(0, 0, 0, 0.1), 0 0 20px -5px rgba(255, 112, 26, 0.1);
+  --shadow-premium-hover: 0 20px 50px -12px rgba(0, 0, 0, 0.12), 0 0 15px rgba(255, 112, 26, 0.08);
+  --shadow-glow: 0 0 20px rgba(255, 112, 26, 0.2);
+}
+
+:root {
+  --bg-primary: #fdfcfb;
+  --bg-secondary: #f8f5f2;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+
+  --text-primary: #1a1512;
+  --text-secondary: #4a423d;
+  --text-muted: #8c837d;
+
+  --accent-primary: #ff701a;
+  --accent-secondary: #f0540a;
+  --accent-glow: rgba(255, 112, 26, 0.15);
+
+  --border-color: rgba(74, 66, 61, 0.12);
+
+  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@layer base {
+  * {
+    @apply border-gray-200 outline-none;
+  }
+
+  body {
+    @apply bg-[var(--bg-primary)] text-[var(--text-primary)] font-sans antialiased selection:bg-brand-100 selection:text-brand-900;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-display tracking-tight text-[var(--text-primary)];
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-[var(--bg-card)] border border-[var(--border-color)] rounded-3xl p-6 shadow-premium transition-all duration-300 hover:shadow-premium-hover hover:-translate-y-1;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2.5 px-6 py-3 rounded-2xl font-bold transition-all duration-300 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply bg-brand-600 text-white shadow-lg shadow-brand-200 hover:bg-brand-700 hover:shadow-brand-300 hover:-translate-y-0.5;
+  }
+
+  .btn-secondary {
+    @apply bg-white border border-[var(--border-color)] text-[var(--text-primary)] hover:bg-gray-50 hover:border-brand-300;
+  }
+
+  .input {
+    @apply w-full px-4 py-3 bg-[var(--bg-secondary)] border border-transparent rounded-2xl text-[var(--text-primary)] transition-all duration-300 focus:bg-white focus:border-brand-500 focus:ring-4 focus:ring-brand-500/10;
+  }
+
+  .glass {
+    @apply bg-white/70 backdrop-blur-xl border border-white/20 shadow-xl;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-200 rounded-full hover:bg-gray-300 transition-colors;
+}
+
+/* Animations */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
