@@ -67,12 +67,8 @@ export const AuthProvider = ({ children }) => {
     const logout = useCallback(() => {
         localStorage.removeItem(ACTIVE_USER_ID_KEY);
         localStorage.removeItem(ACTIVE_USER_PROFILE_KEY);
-        if (users.length > 0) {
-            setActiveUserId(Number(users[0].id));
-            return;
-        }
         setActiveUserId(null);
-    }, [users]);
+    }, []);
 
     const activeUser = useMemo(
         () => users.find((user) => Number(user.id) === Number(activeUserId)) || null,
