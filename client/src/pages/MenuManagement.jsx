@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { ChefHat, Plus, Trash2, Edit2, Search, Filter, UtensilsCrossed, Info, Tag, DollarSign, Check, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useAuth } from '../context/AuthContext';
 
 const MenuManagement = () => {
+    const { activeUser } = useAuth();
     const [productos, setProductos] = useState([]);
     const [categorias, setCategorias] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -20,8 +22,9 @@ const MenuManagement = () => {
     const [currentCategory, setCurrentCategory] = useState({ id: null, nombre: '', descripcion: '', es_barra: false });
 
     useEffect(() => {
+        if (!activeUser) return;
         fetchData();
-    }, []);
+    }, [activeUser]);
 
     const fetchData = async () => {
         setLoading(true);
@@ -30,6 +33,15 @@ const MenuManagement = () => {
                 fetch('http://localhost:3000/api/productos'),
                 fetch('http://localhost:3000/api/categorias')
             ]);
+            
+            if (!prodRes.ok || !catRes.ok) {
+                if (prodRes.status === 401 || catRes.status === 401) {
+                    console.warn('Sesión expirada o no autorizada');
+                    setLoading(false);
+                    return;
+                }
+            }
+            
             setProductos(await prodRes.json());
             setCategorias(await catRes.json());
         } catch (error) {

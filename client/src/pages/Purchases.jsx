@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { ShoppingCart, Plus, Trash2, Save, Package, DollarSign, Calendar, FileText } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useAuth } from '../context/AuthContext';
 
 const Purchases = () => {
+    const { activeUser } = useAuth();
     const [insumos, setInsumos] = useState([]);
     const [productos, setProductos] = useState([]);
     const [proveedores, setProveedores] = useState([]);
@@ -12,8 +14,9 @@ const Purchases = () => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
+        if (!activeUser) return;
         fetchData();
-    }, []);
+    }, [activeUser]);
 
     const fetchData = async () => {
         try {
@@ -22,6 +25,15 @@ const Purchases = () => {
                 fetch('http://localhost:3000/api/productos'),
                 fetch('http://localhost:3000/api/proveedores')
             ]);
+            
+            if (!insRes.ok || !prodRes.ok || !provRes.ok) {
+                if (insRes.status === 401 || prodRes.status === 401 || provRes.status === 401) {
+                    console.warn('Sesión expirada o no autorizada');
+                    setLoading(false);
+                    return;
+                }
+            }
+            
             const insData = await insRes.json();
             const prodData = await prodRes.json();
             const provData = await provRes.json();

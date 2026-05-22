@@ -17,10 +17,11 @@ const POS = () => {
     const [activeOrder, setActiveOrder] = useState(null);
 
     useEffect(() => {
+        if (!activeUser) return;
         fetchData();
         const interval = setInterval(fetchData, 10000); 
         return () => clearInterval(interval);
-    }, []);
+    }, [activeUser]);
 
     useEffect(() => {
         if (selectedMesa) {
@@ -70,6 +71,13 @@ const POS = () => {
                 fetch('http://localhost:3000/api/zonas'),
                 fetch('http://localhost:3000/api/productos')
             ]);
+
+            if (!mesasRes.ok || !zonasRes.ok || !productosRes.ok) {
+                if (mesasRes.status === 401 || zonasRes.status === 401 || productosRes.status === 401) {
+                    console.warn('Sesión expirada o no autorizada');
+                    return;
+                }
+            }
 
             const mesasData = await mesasRes.json();
             const zonasData = await zonasRes.json();

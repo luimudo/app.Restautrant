@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { Package, Search, AlertTriangle, ArrowUpRight, Coffee, Beer, Database, Plus, Edit2, Trash2, X, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 
 const Inventory = () => {
     const navigate = useNavigate();
+    const { activeUser } = useAuth();
     const [insumos, setInsumos] = useState([]);
     const [productosBar, setProductosBar] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -16,8 +18,9 @@ const Inventory = () => {
     const [currentItem, setCurrentItem] = useState({ id: null, nombre: '', unidad_medida: 'Unidad', costo_unitario: 0, stock_actual: 0 });
 
     useEffect(() => {
+        if (!activeUser) return;
         fetchData();
-    }, []);
+    }, [activeUser]);
 
     const fetchData = async () => {
         try {
@@ -25,6 +28,15 @@ const Inventory = () => {
                 fetch('http://localhost:3000/api/insumos'),
                 fetch('http://localhost:3000/api/productos')
             ]);
+            
+            if (!insRes.ok || !prodRes.ok) {
+                if (insRes.status === 401 || prodRes.status === 401) {
+                    console.warn('Sesión expirada o no autorizada');
+                    setLoading(false);
+                    return;
+                }
+            }
+            
             const insData = await insRes.json();
             const prodData = await prodRes.json();
             setInsumos(Array.isArray(insData) ? insData : []);
