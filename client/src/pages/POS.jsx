@@ -34,7 +34,7 @@ const POS = () => {
 
     const fetchActiveOrder = async (mesaId) => {
         try {
-            const res = await fetch(`http://localhost:3000/api/pedidos/mesa/${mesaId}/activo`);
+            const res = await fetch(`/api/pedidos/mesa/${mesaId}/activo`);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err.error || 'No se pudo obtener la comanda activa');
@@ -67,9 +67,9 @@ const POS = () => {
     const fetchData = async () => {
         try {
             const [mesasRes, zonasRes, productosRes] = await Promise.all([
-                fetch('http://localhost:3000/api/mesas'),
-                fetch('http://localhost:3000/api/zonas'),
-                fetch('http://localhost:3000/api/productos')
+                fetch('/api/mesas'),
+                fetch('/api/zonas'),
+                fetch('/api/productos')
             ]);
 
             if (!mesasRes.ok || !zonasRes.ok || !productosRes.ok) {
@@ -205,8 +205,8 @@ const POS = () => {
 
         try {
             const url = activeOrder 
-                ? `http://localhost:3000/api/pedidos/${activeOrder.id}/items` 
-                : 'http://localhost:3000/api/pedidos';
+                ? `/api/pedidos/${activeOrder.id}/items` 
+                : '/api/pedidos';
             
             const method = activeOrder ? 'PUT' : 'POST';
 
@@ -255,7 +255,7 @@ const POS = () => {
     );
 
     return (
-        <div className="flex flex-col lg:flex-row gap-8 h-[calc(100vh-160px)]">
+        <div className="flex flex-col lg:flex-row gap-8 lg:h-[calc(100vh-160px)]">
             <div className="flex-1 flex flex-col min-w-0">
                 <AnimatePresence mode="wait">
                     {!selectedMesa ? (

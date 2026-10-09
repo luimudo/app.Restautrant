@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const path = require('path');
+const fs = require('fs');
 const pool = require('./db');
 
 dotenv.config();
@@ -14,10 +16,17 @@ app.use(express.json());
 // Routes
 // We will define routes here or import them
 
-// Basic Health Check
-app.get('/', (req, res) => {
-    res.send('Restaurant System API Running');
-});
+const clientBuildPath = path.join(__dirname, 'public');
+const hasClientBuild = fs.existsSync(path.join(clientBuildPath, 'index.html'));
+
+if (hasClientBuild) {
+    app.use(express.static(clientBuildPath));
+} else {
+    // Basic Health Check (only used when no client build is bundled, e.g. local API-only dev)
+    app.get('/', (req, res) => {
+        res.send('Restaurant System API Running');
+    });
+}
 
 const USER_PROFILES = ['administrador', 'mozo', 'caja', 'cocina'];
 const PROFILE_ALIASES = {
@@ -1557,6 +1566,15 @@ app.get('/api/reportes/ventas', allowAdminOrCashier, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+if (hasClientBuild) {
+    // Express 5 (path-to-regexp v6+) rejects a bare '*' route pattern,
+    // so the SPA fallback is a path-less middleware instead.
+    app.use((req, res, next) => {
+        if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+        res.sendFile(path.join(clientBuildPath, 'index.html'));
+    });
+}
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);

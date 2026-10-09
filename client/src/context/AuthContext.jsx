@@ -30,7 +30,7 @@ export const AuthProvider = ({ children }) => {
         const loadUsers = async () => {
             setLoading(true);
             try {
-                const response = await fetch('http://localhost:3000/api/usuarios');
+                const response = await fetch('/api/usuarios');
                 if (!response.ok) throw new Error('No se pudo cargar usuarios');
                 const data = await response.json();
                 const safeUsers = Array.isArray(data) && data.length > 0 ? data : [FALLBACK_ADMIN_USER];

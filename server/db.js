@@ -13,8 +13,14 @@ db.pragma('foreign_keys = ON');
  *   SELECT → [rows, null]
  *   INSERT/UPDATE/DELETE → [{ insertId, affectedRows }, null]
  */
+// mysql2 accepts JS booleans as bind params; better-sqlite3 only accepts
+// numbers, strings, bigints, buffers and null, so booleans must become 0/1.
+function normalizeParam(value) {
+    return typeof value === 'boolean' ? (value ? 1 : 0) : value;
+}
+
 function executeQuery(sql, params = []) {
-    const args = Array.isArray(params) ? params : [params];
+    const args = (Array.isArray(params) ? params : [params]).map(normalizeParam);
     const verb = sql.trimStart().slice(0, 6).toUpperCase();
 
     if (verb === 'SELECT' || verb === 'WITH   ' || verb === 'PRAGMA') {

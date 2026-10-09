@@ -45,9 +45,9 @@ const Dashboard = () => {
     const fetchDashboardData = async () => {
         try {
             const [ordersRes, clientsRes, salesTodayRes] = await Promise.all([
-                fetch('http://localhost:3000/api/pedidos'),
-                fetch('http://localhost:3000/api/clientes'),
-                fetch('http://localhost:3000/api/stats/ventas-hoy')
+                fetch('/api/pedidos'),
+                fetch('/api/clientes'),
+                fetch('/api/stats/ventas-hoy')
             ]);
 
             const ordersData = await ordersRes.json();
@@ -111,7 +111,7 @@ const Dashboard = () => {
         try {
             const { desde, hasta } = buildDateRange(range);
             const query = new URLSearchParams({ desde, hasta });
-            const res = await fetch(`http://localhost:3000/api/stats/ventas-tiempo?${query.toString()}`);
+            const res = await fetch(`/api/stats/ventas-tiempo?${query.toString()}`);
             if (!res.ok) throw new Error('No se pudo cargar la serie de ventas');
             const data = await res.json();
             setSalesTimeline(Array.isArray(data?.series) ? data.series : []);

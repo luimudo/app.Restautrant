@@ -21,9 +21,9 @@ const Purchases = () => {
     const fetchData = async () => {
         try {
             const [insRes, prodRes, provRes] = await Promise.all([
-                fetch('http://localhost:3000/api/insumos'),
-                fetch('http://localhost:3000/api/productos'),
-                fetch('http://localhost:3000/api/proveedores')
+                fetch('/api/insumos'),
+                fetch('/api/productos'),
+                fetch('/api/proveedores')
             ]);
             
             if (!insRes.ok || !prodRes.ok || !provRes.ok) {
@@ -85,7 +85,7 @@ const Purchases = () => {
         };
 
         try {
-            const res = await fetch('http://localhost:3000/api/compras', {
+            const res = await fetch('/api/compras', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)

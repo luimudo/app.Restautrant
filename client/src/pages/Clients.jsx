@@ -15,7 +15,7 @@ const Clients = () => {
 
     const fetchClients = async () => {
         try {
-            const response = await fetch('http://localhost:3000/api/clientes');
+            const response = await fetch('/api/clientes');
             const data = await response.json();
             setClients(Array.isArray(data) ? data : []);
         } catch (error) {
@@ -29,7 +29,7 @@ const Clients = () => {
     const handleSubmit = async (e) => {
         e.preventDefault();
         try {
-            const response = await fetch('http://localhost:3000/api/clientes', {
+            const response = await fetch('/api/clientes', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(formData)
@@ -87,7 +87,7 @@ const Clients = () => {
                     </div>
                 </div>
 
-                <div className="table-container rounded-2xl border border-[var(--border-color)]">
+                <div className="rounded-2xl border border-[var(--border-color)] overflow-x-auto">
                     <table className="w-full border-collapse">
                         <thead>
                             <tr className="bg-gray-50/50">

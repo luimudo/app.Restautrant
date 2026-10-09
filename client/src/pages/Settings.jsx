@@ -17,8 +17,10 @@ const Settings = () => {
 
     const [showUserModal, setShowUserModal] = useState(false);
     const [showCorrModal, setShowCorrModal] = useState(false);
+    const [showMesaModal, setShowMesaModal] = useState(false);
     const [formUser, setFormUser] = useState({ id: null, nombre: '', email: '', perfil: 'mozo', password: '' });
     const [formCorr, setFormCorr] = useState({ tipo: '', serie: '', siguiente_numero: 1 });
+    const [formMesa, setFormMesa] = useState({ id: null, numero: '', capacidad: 4, zona_id: '' });
     const [userSearch, setUserSearch] = useState('');
     const [userProfileFilter, setUserProfileFilter] = useState('todos');
     const [userPage, setUserPage] = useState(1);
@@ -78,11 +80,11 @@ const Settings = () => {
         setError('');
         try {
             const [users, profiles, zones, tables, corrs] = await Promise.all([
-                safeFetchJson('http://localhost:3000/api/usuarios', []),
-                safeFetchJson('http://localhost:3000/api/perfiles', FALLBACK_PROFILES),
-                safeFetchJson('http://localhost:3000/api/zonas', []),
-                safeFetchJson('http://localhost:3000/api/mesas', []),
-                safeFetchJson('http://localhost:3000/api/correlativos', [])
+                safeFetchJson('/api/usuarios', []),
+                safeFetchJson('/api/perfiles', FALLBACK_PROFILES),
+                safeFetchJson('/api/zonas', []),
+                safeFetchJson('/api/mesas', []),
+                safeFetchJson('/api/correlativos', [])
             ]);
             setUsuarios(Array.isArray(users) ? users : []);
             setPerfiles(Array.isArray(profiles) && profiles.length > 0 ? profiles : FALLBACK_PROFILES);
@@ -131,8 +133,8 @@ const Settings = () => {
         if (formUser.password.trim()) payload.password = formUser.password.trim();
 
         const url = isEdit
-            ? `http://localhost:3000/api/usuarios/${formUser.id}`
-            : 'http://localhost:3000/api/usuarios';
+            ? `/api/usuarios/${formUser.id}`
+            : '/api/usuarios';
         const method = isEdit ? 'PUT' : 'POST';
 
         try {
@@ -162,7 +164,7 @@ const Settings = () => {
         }
         if (!window.confirm(`Eliminar usuario ${user.nombre}?`)) return;
         try {
-            const res = await fetch(`http://localhost:3000/api/usuarios/${user.id}`, { method: 'DELETE' });
+            const res = await fetch(`/api/usuarios/${user.id}`, { method: 'DELETE' });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err.error || 'No se pudo eliminar el usuario.');
@@ -188,7 +190,7 @@ const Settings = () => {
         setError('');
         setMessage('');
         try {
-            const res = await fetch(`http://localhost:3000/api/correlativos/${formCorr.tipo}`, {
+            const res = await fetch(`/api/correlativos/${formCorr.tipo}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -199,6 +201,73 @@ const Settings = () => {
             if (!res.ok) throw new Error('No se pudo actualizar el correlativo.');
             setMessage('Correlativo actualizado.');
             setShowCorrModal(false);
+            fetchAll();
+        } catch (e) {
+            setError(e.message);
+        }
+    };
+
+    const openCreateMesa = () => {
+        setFormMesa({ id: null, numero: '', capacidad: 4, zona_id: zonas[0]?.id || '' });
+        setShowMesaModal(true);
+    };
+
+    const openEditMesa = (mesa) => {
+        setFormMesa({
+            id: mesa.id,
+            numero: mesa.numero,
+            capacidad: mesa.capacidad,
+            zona_id: mesa.zona_id || ''
+        });
+        setShowMesaModal(true);
+    };
+
+    const saveMesa = async (event) => {
+        event.preventDefault();
+        setError('');
+        setMessage('');
+
+        const isEdit = Boolean(formMesa.id);
+        const payload = {
+            numero: formMesa.numero,
+            capacidad: Number(formMesa.capacidad) || 1,
+            zona_id: formMesa.zona_id || null
+        };
+
+        const url = isEdit
+            ? `/api/mesas/${formMesa.id}`
+            : '/api/mesas';
+        const method = isEdit ? 'PUT' : 'POST';
+
+        try {
+            const res = await fetch(url, {
+                method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'No se pudo guardar la mesa.');
+            }
+            setMessage(isEdit ? 'Mesa actualizada.' : 'Mesa creada.');
+            setShowMesaModal(false);
+            fetchAll();
+        } catch (e) {
+            setError(e.message);
+        }
+    };
+
+    const deleteMesa = async (mesa) => {
+        setError('');
+        setMessage('');
+        if (!window.confirm(`Eliminar mesa ${mesa.numero}?`)) return;
+        try {
+            const res = await fetch(`/api/mesas/${mesa.id}`, { method: 'DELETE' });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'No se pudo eliminar la mesa.');
+            }
+            setMessage('Mesa eliminada.');
             fetchAll();
         } catch (e) {
             setError(e.message);
@@ -336,12 +405,25 @@ const Settings = () => {
                     </div>
                 </div>
                 <div className="card p-6">
-                    <div className="flex items-center gap-2 mb-3">
-                        <Utensils className="text-brand-600" />
-                        <h3 className="text-lg font-black">Mesas</h3>
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                            <Utensils className="text-brand-600" />
+                            <h3 className="text-lg font-black">Mesas</h3>
+                        </div>
+                        <button className="btn btn-primary text-xs px-3 py-2 flex items-center gap-1" onClick={openCreateMesa}>
+                            <Plus size={14} /> Nueva mesa
+                        </button>
                     </div>
                     <div className="space-y-2">
-                        {mesas.map((m) => <div key={m.id} className="p-3 rounded-xl bg-gray-50 font-semibold">Mesa {m.numero} - {m.zona_nombre || 'Sin zona'}</div>)}
+                        {mesas.map((m) => (
+                            <div key={m.id} className="p-3 rounded-xl bg-gray-50 font-semibold flex items-center justify-between gap-2">
+                                <span>Mesa {m.numero} - {m.zona_nombre || 'Sin zona'} ({m.capacidad} pers.)</span>
+                                <div className="flex items-center gap-1">
+                                    <button className="p-2 text-gray-500 hover:text-brand-600" onClick={() => openEditMesa(m)}><Edit2 size={14} /></button>
+                                    <button className="p-2 text-gray-500 hover:text-rose-600" onClick={() => deleteMesa(m)}><Trash2 size={14} /></button>
+                                </div>
+                            </div>
+                        ))}
                         {mesas.length === 0 && <p className="text-gray-500">No hay mesas.</p>}
                     </div>
                 </div>
@@ -376,6 +458,26 @@ const Settings = () => {
                             <input className="input" type="number" min={1} placeholder="Siguiente numero" value={formCorr.siguiente_numero} onChange={(e) => setFormCorr({ ...formCorr, siguiente_numero: Number(e.target.value) || 1 })} required />
                             <div className="flex gap-3 pt-2">
                                 <button type="button" className="btn btn-secondary flex-1" onClick={() => setShowCorrModal(false)}>Cancelar</button>
+                                <button type="submit" className="btn btn-primary flex-1">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {showMesaModal && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-3xl p-8 w-full max-w-md">
+                        <h4 className="text-2xl font-black mb-5">{formMesa.id ? 'Editar Mesa' : 'Nueva Mesa'}</h4>
+                        <form onSubmit={saveMesa} className="space-y-4">
+                            <input className="input" placeholder="Numero de mesa" value={formMesa.numero} onChange={(e) => setFormMesa({ ...formMesa, numero: e.target.value })} required />
+                            <input className="input" type="number" min={1} placeholder="Capacidad" value={formMesa.capacidad} onChange={(e) => setFormMesa({ ...formMesa, capacidad: e.target.value })} required />
+                            <select className="input" value={formMesa.zona_id} onChange={(e) => setFormMesa({ ...formMesa, zona_id: e.target.value })}>
+                                <option value="">Sin zona</option>
+                                {zonas.map((z) => <option key={z.id} value={z.id}>{z.nombre}</option>)}
+                            </select>
+                            <div className="flex gap-3 pt-2">
+                                <button type="button" className="btn btn-secondary flex-1" onClick={() => setShowMesaModal(false)}>Cancelar</button>
                                 <button type="submit" className="btn btn-primary flex-1">Guardar</button>
                             </div>
                         </form>

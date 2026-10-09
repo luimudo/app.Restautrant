@@ -60,7 +60,7 @@ const Billing = () => {
 
     const fetchTotalHoy = async () => {
         try {
-            const res = await fetch('http://localhost:3000/api/stats/ventas-hoy');
+            const res = await fetch('/api/stats/ventas-hoy');
             const data = await res.json();
             setTotalHoy(data.total);
         } catch (error) {
@@ -70,7 +70,7 @@ const Billing = () => {
 
     const fetchPedidos = async () => {
         try {
-            const res = await fetch('http://localhost:3000/api/pedidos');
+            const res = await fetch('/api/pedidos');
             if (!res.ok) throw new Error('Error al cargar pedidos');
             const data = await res.json();
 
@@ -105,7 +105,7 @@ const Billing = () => {
                 desde: range.desde,
                 hasta: range.hasta
             });
-            const res = await fetch(`http://localhost:3000/api/reportes/ventas?${query.toString()}`);
+            const res = await fetch(`/api/reportes/ventas?${query.toString()}`);
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
                 throw new Error(errData.error || 'No se pudo obtener el reporte');
@@ -135,8 +135,8 @@ const Billing = () => {
         setCashAuditError('');
         try {
             const [cajasRes, activeRes] = await Promise.all([
-                fetch('http://localhost:3000/api/cajas'),
-                fetch('http://localhost:3000/api/caja/sesion-activa')
+                fetch('/api/cajas'),
+                fetch('/api/caja/sesion-activa')
             ]);
 
             if (!cajasRes.ok) throw new Error('No se pudo cargar las cajas');
@@ -187,7 +187,7 @@ const Billing = () => {
         event.preventDefault();
         setCashAuditError('');
         try {
-            const response = await fetch('http://localhost:3000/api/caja/apertura', {
+            const response = await fetch('/api/caja/apertura', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -220,7 +220,7 @@ const Billing = () => {
         if (!activeCashSession?.id) return;
         setCashAuditError('');
         try {
-            const response = await fetch('http://localhost:3000/api/caja/movimiento-manual', {
+            const response = await fetch('/api/caja/movimiento-manual', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -250,7 +250,7 @@ const Billing = () => {
         if (!activeCashSession?.id) return;
         setCashAuditError('');
         try {
-            const response = await fetch('http://localhost:3000/api/caja/cierre', {
+            const response = await fetch('/api/caja/cierre', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -363,7 +363,7 @@ const Billing = () => {
     const processPayment = async (pedido, tipo) => {
         try {
             // 1. Obtener el pedido exacto con detalles para el PDF
-            const detailsRes = await fetch(`http://localhost:3000/api/pedidos/${pedido.id}/detalle`);
+            const detailsRes = await fetch(`/api/pedidos/${pedido.id}/detalle`);
             if (!detailsRes.ok) {
                 alert("No se pudieron obtener los detalles del pedido.");
                 return;
@@ -371,7 +371,7 @@ const Billing = () => {
             const orderWithDetails = await detailsRes.json();
 
             // 2. Procesar el pago y obtener correlativo
-            const response = await fetch('http://localhost:3000/api/facturas', {
+            const response = await fetch('/api/facturas', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

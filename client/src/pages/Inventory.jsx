@@ -25,8 +25,8 @@ const Inventory = () => {
     const fetchData = async () => {
         try {
             const [insRes, prodRes] = await Promise.all([
-                fetch('http://localhost:3000/api/insumos'),
-                fetch('http://localhost:3000/api/productos')
+                fetch('/api/insumos'),
+                fetch('/api/productos')
             ]);
             
             if (!insRes.ok || !prodRes.ok) {
@@ -54,8 +54,8 @@ const Inventory = () => {
         e.preventDefault();
         const method = currentItem.id ? 'PUT' : 'POST';
         const url = currentItem.id
-            ? `http://localhost:3000/api/insumos/${currentItem.id}`
-            : 'http://localhost:3000/api/insumos';
+            ? `/api/insumos/${currentItem.id}`
+            : '/api/insumos';
 
         try {
             const res = await fetch(url, {
@@ -75,7 +75,7 @@ const Inventory = () => {
     const handleDelete = async (id) => {
         if (!confirm('¿Estás seguro de eliminar este insumo?')) return;
         try {
-            const res = await fetch(`http://localhost:3000/api/insumos/${id}`, { method: 'DELETE' });
+            const res = await fetch(`/api/insumos/${id}`, { method: 'DELETE' });
             if (res.ok) fetchData();
         } catch (error) {
             console.error('Error deleting insumo:', error);

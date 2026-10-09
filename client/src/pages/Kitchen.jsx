@@ -14,7 +14,7 @@ const KitchenPage = () => {
 
     const fetchPedidos = async () => {
         try {
-            const res = await fetch('http://localhost:3000/api/pedidos/cocina');
+            const res = await fetch('/api/pedidos/cocina');
             if (res.ok) {
                 const data = await res.json();
                 setPedidos(Array.isArray(data) ? data : []);
@@ -35,7 +35,7 @@ const KitchenPage = () => {
         if (!itemId) return;
         
         try {
-            await fetch(`http://localhost:3000/api/pedidos/detalle/${itemId}/estado`, {
+            await fetch(`/api/pedidos/detalle/${itemId}/estado`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ estado: nuevoEstado })

@@ -30,8 +30,8 @@ const MenuManagement = () => {
         setLoading(true);
         try {
             const [prodRes, catRes] = await Promise.all([
-                fetch('http://localhost:3000/api/productos'),
-                fetch('http://localhost:3000/api/categorias')
+                fetch('/api/productos'),
+                fetch('/api/categorias')
             ]);
             
             if (!prodRes.ok || !catRes.ok) {
@@ -54,8 +54,8 @@ const MenuManagement = () => {
     const handleSaveProduct = async (e) => {
         e.preventDefault();
         const url = currentProduct.id
-            ? `http://localhost:3000/api/productos/${currentProduct.id}`
-            : 'http://localhost:3000/api/productos';
+            ? `/api/productos/${currentProduct.id}`
+            : '/api/productos';
         const method = currentProduct.id ? 'PUT' : 'POST';
 
         try {
@@ -77,7 +77,7 @@ const MenuManagement = () => {
     const handleDeleteProduct = async (id) => {
         if (!confirm('¿Estás seguro de eliminar este plato?')) return;
         try {
-            await fetch(`http://localhost:3000/api/productos/${id}`, { method: 'DELETE' });
+            await fetch(`/api/productos/${id}`, { method: 'DELETE' });
             fetchData();
         } catch (error) {
             console.error('Error deleting product:', error);
@@ -87,8 +87,8 @@ const MenuManagement = () => {
     const handleSaveCategory = async (e) => {
         e.preventDefault();
         const url = currentCategory.id
-            ? `http://localhost:3000/api/categorias/${currentCategory.id}`
-            : 'http://localhost:3000/api/categorias';
+            ? `/api/categorias/${currentCategory.id}`
+            : '/api/categorias';
         const method = currentCategory.id ? 'PUT' : 'POST';
 
         try {
@@ -110,7 +110,7 @@ const MenuManagement = () => {
     const handleDeleteCategory = async (id) => {
         if (!confirm('¿Estás seguro de eliminar esta categoría?')) return;
         try {
-            await fetch(`http://localhost:3000/api/categorias/${id}`, { method: 'DELETE' });
+            await fetch(`/api/categorias/${id}`, { method: 'DELETE' });
             fetchData();
         } catch (error) {
             console.error('Error deleting category:', error);

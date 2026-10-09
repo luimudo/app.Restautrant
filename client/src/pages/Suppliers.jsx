@@ -22,7 +22,7 @@ const Suppliers = () => {
 
     const fetchData = async () => {
         try {
-            const res = await fetch('http://localhost:3000/api/proveedores');
+            const res = await fetch('/api/proveedores');
             if (!res.ok) throw new Error('Error al obtener proveedores');
             const data = await res.json();
             setSuppliers(Array.isArray(data) ? data : []);
@@ -37,8 +37,8 @@ const Suppliers = () => {
         e.preventDefault();
         const method = currentSupplier.id ? 'PUT' : 'POST';
         const url = currentSupplier.id
-            ? `http://localhost:3000/api/proveedores/${currentSupplier.id}`
-            : 'http://localhost:3000/api/proveedores';
+            ? `/api/proveedores/${currentSupplier.id}`
+            : '/api/proveedores';
 
         try {
             const res = await fetch(url, {
@@ -62,7 +62,7 @@ const Suppliers = () => {
     const handleDelete = async (id) => {
         if (!confirm('¿Estás seguro de eliminar este proveedor?')) return;
         try {
-            const res = await fetch(`http://localhost:3000/api/proveedores/${id}`, { method: 'DELETE' });
+            const res = await fetch(`/api/proveedores/${id}`, { method: 'DELETE' });
             if (res.ok) fetchData();
         } catch (error) {
             console.error('Error deleting supplier:', error);
