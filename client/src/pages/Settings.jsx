@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { UserCog, Shield, Plus, Edit2, Trash2, Hash, Layers, Utensils } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { SUPERADMIN } from '../security/accessControl';
@@ -344,7 +345,11 @@ const Settings = () => {
                     </div>
                     <button className="btn btn-primary text-xs" onClick={openCreateUser}><Plus size={14} /> Nuevo Usuario</button>
                 </div>
-                <p className="text-xs text-gray-500 mb-4">Perfiles disponibles: {perfiles.map((p) => profileLabel(p)).join(', ')}</p>
+                <p className="text-xs text-gray-500 mb-4">
+                    Perfiles disponibles: {perfiles.map((p) => profileLabel(p)).join(', ')}.{' '}
+                    {!isSuperadmin && 'Los perfiles multisede (p. ej. Contador) los asigna el super administrador. '}
+                    <Link to="/permisos" className="font-bold text-brand-600 hover:underline">Ver o editar los permisos de cada perfil</Link>
+                </p>
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_220px] gap-3 mb-4">
                     <input
                         className="input"
