@@ -1,0 +1,22 @@
+{
+  "name": "restaurant-tinpu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Raiz para el despliegue con GitHub en SmarterASP: npm install + npm run build + npm start",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node scripts/build-hosting.cjs",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "mysql2": "^3.24.5",
+    "pdfkit": "^0.17.2",
+    "qrcode": "^1.5.4"
+  }
+}

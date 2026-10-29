@@ -82,3 +82,6 @@ site14.PublishSettings
 *.PublishSettings
 .claude/
 .publicacion-stage-*/
+
+# Generado por scripts/build-hosting.cjs en el despliegue
+/server/public/
