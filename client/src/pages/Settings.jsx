@@ -1,16 +1,30 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { UserCog, Shield, Plus, Edit2, Trash2, Hash, Layers, Utensils } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { SUPERADMIN } from '../security/accessControl';
+import FacturacionConfig from '../components/settings/FacturacionConfig';
+import { formatDateTime } from '../utils/dateTime';
 
 const FALLBACK_PROFILES = ['administrador', 'mozo', 'caja', 'cocina'];
 const USERS_PAGE_SIZE = 8;
 
+const EMPTY_USER = { id: null, nombre: '', usuario: '', email: '', perfil: 'mozo', password: '', sede_id: '' };
+
+const CORRELATIVO_LABEL = {
+    boleta: 'Boleta electrónica', factura: 'Factura electrónica', nota_venta: 'Nota de venta (interna)',
+    nc_boleta: 'Nota de crédito de boleta', nd_boleta: 'Nota de débito de boleta',
+    nc_factura: 'Nota de crédito de factura', nd_factura: 'Nota de débito de factura'
+};
+
 const Settings = () => {
+    const { isSystemSuperadmin: isSuperadmin, sedes, activeSede, activeSedeId, profileLabel } = useAuth();
     const [loading, setLoading] = useState(true);
     const [message, setMessage] = useState('');
     const [error, setError] = useState('');
 
     const [usuarios, setUsuarios] = useState([]);
     const [perfiles, setPerfiles] = useState(FALLBACK_PROFILES);
+    const [perfilesMultisede, setPerfilesMultisede] = useState([]);
     const [zonas, setZonas] = useState([]);
     const [mesas, setMesas] = useState([]);
     const [correlativos, setCorrelativos] = useState([]);
@@ -18,7 +32,8 @@ const Settings = () => {
     const [showUserModal, setShowUserModal] = useState(false);
     const [showCorrModal, setShowCorrModal] = useState(false);
     const [showMesaModal, setShowMesaModal] = useState(false);
-    const [formUser, setFormUser] = useState({ id: null, nombre: '', email: '', perfil: 'mozo', password: '' });
+    const [formUser, setFormUser] = useState(EMPTY_USER);
+    const [nuevaZona, setNuevaZona] = useState('');
     const [formCorr, setFormCorr] = useState({ tipo: '', serie: '', siguiente_numero: 1 });
     const [formMesa, setFormMesa] = useState({ id: null, numero: '', capacidad: 4, zona_id: '' });
     const [userSearch, setUserSearch] = useState('');
@@ -36,7 +51,8 @@ const Settings = () => {
             const matchProfile = userProfileFilter === 'todos' || u.perfil === userProfileFilter;
             const matchSearch = search.length === 0
                 || String(u.nombre || '').toLowerCase().includes(search)
-                || String(u.email || '').toLowerCase().includes(search);
+                || String(u.email || '').toLowerCase().includes(search)
+                || String(u.usuario || '').toLowerCase().includes(search);
             return matchProfile && matchSearch;
         });
     }, [usuarios, userSearch, userProfileFilter]);
@@ -79,15 +95,17 @@ const Settings = () => {
         setLoading(true);
         setError('');
         try {
-            const [users, profiles, zones, tables, corrs] = await Promise.all([
+            const [users, profiles, detalle, zones, tables, corrs] = await Promise.all([
                 safeFetchJson('/api/usuarios', []),
                 safeFetchJson('/api/perfiles', FALLBACK_PROFILES),
+                safeFetchJson('/api/perfiles/detalle', []),
                 safeFetchJson('/api/zonas', []),
                 safeFetchJson('/api/mesas', []),
                 safeFetchJson('/api/correlativos', [])
             ]);
             setUsuarios(Array.isArray(users) ? users : []);
             setPerfiles(Array.isArray(profiles) && profiles.length > 0 ? profiles : FALLBACK_PROFILES);
+            setPerfilesMultisede((Array.isArray(detalle) ? detalle : []).filter((p) => p.alcance === 'multisede').map((p) => p.codigo));
             setZonas(Array.isArray(zones) ? zones : []);
             setMesas(Array.isArray(tables) ? tables : []);
             setCorrelativos(Array.isArray(corrs) ? corrs : []);
@@ -99,7 +117,7 @@ const Settings = () => {
     };
 
     const openCreateUser = () => {
-        setFormUser({ id: null, nombre: '', email: '', perfil: perfiles[0] || 'mozo', password: '' });
+        setFormUser({ ...EMPTY_USER, perfil: perfiles.find((p) => p !== SUPERADMIN) || 'mozo', sede_id: activeSedeId || '' });
         setShowUserModal(true);
     };
 
@@ -107,9 +125,11 @@ const Settings = () => {
         setFormUser({
             id: user.id,
             nombre: user.nombre || '',
+            usuario: user.usuario || '',
             email: user.email || '',
             perfil: user.perfil || 'mozo',
-            password: ''
+            password: '',
+            sede_id: user.sede_id || ''
         });
         setShowUserModal(true);
     };
@@ -127,9 +147,11 @@ const Settings = () => {
 
         const payload = {
             nombre: formUser.nombre.trim(),
+            usuario: formUser.usuario.trim(),
             email: formUser.email.trim(),
             perfil: formUser.perfil
         };
+        if (isSuperadmin && formUser.perfil !== SUPERADMIN) payload.sede_id = Number(formUser.sede_id) || null;
         if (formUser.password.trim()) payload.password = formUser.password.trim();
 
         const url = isEdit
@@ -201,6 +223,29 @@ const Settings = () => {
             if (!res.ok) throw new Error('No se pudo actualizar el correlativo.');
             setMessage('Correlativo actualizado.');
             setShowCorrModal(false);
+            fetchAll();
+        } catch (e) {
+            setError(e.message);
+        }
+    };
+
+    const saveZona = async (event) => {
+        event.preventDefault();
+        setError('');
+        setMessage('');
+        if (!nuevaZona.trim()) return;
+        try {
+            const res = await fetch('/api/zonas', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nombre: nuevaZona.trim() })
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'No se pudo crear la zona.');
+            }
+            setNuevaZona('');
+            setMessage('Zona creada.');
             fetchAll();
         } catch (e) {
             setError(e.message);
@@ -282,7 +327,10 @@ const Settings = () => {
         <div className="space-y-8">
             <div>
                 <h2 className="text-4xl font-display font-black tracking-tight">Configuracion <span className="text-brand-600">del Sistema</span></h2>
-                <p className="text-[var(--text-secondary)] mt-2">Gestion de usuarios y perfiles del restaurante.</p>
+                <p className="text-[var(--text-secondary)] mt-2">
+                    Gestion de usuarios, comprobantes, zonas y mesas{activeSede ? <> de <span className="font-bold text-[var(--text-primary)]">{activeSede.nombre}</span></> : ''}.
+                    {isSuperadmin && ' Como super admin ves los usuarios de todas las sedes.'}
+                </p>
             </div>
 
             {message && <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">{message}</div>}
@@ -296,11 +344,11 @@ const Settings = () => {
                     </div>
                     <button className="btn btn-primary text-xs" onClick={openCreateUser}><Plus size={14} /> Nuevo Usuario</button>
                 </div>
-                <p className="text-xs text-gray-500 mb-4">Perfiles disponibles: {perfiles.join(', ')}</p>
+                <p className="text-xs text-gray-500 mb-4">Perfiles disponibles: {perfiles.map((p) => profileLabel(p)).join(', ')}</p>
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_220px] gap-3 mb-4">
                     <input
                         className="input"
-                        placeholder="Buscar por nombre o email..."
+                        placeholder="Buscar por nombre, usuario o email..."
                         value={userSearch}
                         onChange={(e) => setUserSearch(e.target.value)}
                     />
@@ -310,7 +358,7 @@ const Settings = () => {
                         onChange={(e) => setUserProfileFilter(e.target.value)}
                     >
                         <option value="todos">Todos los perfiles</option>
-                        {perfiles.map((p) => <option key={p} value={p}>{p}</option>)}
+                        {perfiles.map((p) => <option key={p} value={p}>{profileLabel(p)}</option>)}
                     </select>
                 </div>
                 <div className="overflow-x-auto">
@@ -318,7 +366,9 @@ const Settings = () => {
                         <thead>
                             <tr className="text-left text-xs uppercase text-gray-500 border-b">
                                 <th className="py-3">Nombre</th>
+                                <th className="py-3">Usuario</th>
                                 <th className="py-3">Email</th>
+                                {isSuperadmin && <th className="py-3">Sede</th>}
                                 <th className="py-3">Perfil</th>
                                 <th className="py-3">Creado</th>
                                 <th className="py-3 text-right">Acciones</th>
@@ -328,13 +378,15 @@ const Settings = () => {
                             {paginatedUsers.map((u) => (
                                 <tr key={u.id} className="border-b border-gray-100">
                                     <td className="py-3 font-semibold">{u.nombre}</td>
+                                    <td className="py-3 font-mono text-sm">{u.usuario}</td>
                                     <td className="py-3">{u.email}</td>
+                                    {isSuperadmin && <td className="py-3 text-sm">{u.sede_nombre || 'Todas'}</td>}
                                     <td className="py-3">
                                         <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-brand-50 text-brand-700 text-xs font-bold">
-                                            <Shield size={12} />{u.perfil}
+                                            <Shield size={12} />{profileLabel(u.perfil)}
                                         </span>
                                     </td>
-                                    <td className="py-3 text-sm">{u.creado_en ? new Date(u.creado_en).toLocaleString() : '-'}</td>
+                                    <td className="py-3 text-sm">{formatDateTime(u.creado_en)}</td>
                                     <td className="py-3 text-right">
                                         <button className="p-2 text-gray-500 hover:text-brand-600" onClick={() => openEditUser(u)}><Edit2 size={14} /></button>
                                         <button className="p-2 text-gray-500 hover:text-rose-600" onClick={() => deleteUser(u)}><Trash2 size={14} /></button>
@@ -342,7 +394,7 @@ const Settings = () => {
                                 </tr>
                             ))}
                             {filteredUsers.length === 0 && (
-                                <tr><td colSpan="5" className="py-6 text-center text-gray-500">No hay usuarios para ese filtro.</td></tr>
+                                <tr><td colSpan={isSuperadmin ? 7 : 6} className="py-6 text-center text-gray-500">No hay usuarios para ese filtro.</td></tr>
                             )}
                         </tbody>
                     </table>
@@ -377,15 +429,18 @@ const Settings = () => {
                 </div>
             </div>
 
+            <FacturacionConfig />
+
             <div className="card p-6 bg-gray-900 text-white border-none">
                 <div className="flex items-center gap-2 mb-4">
                     <Hash className="text-brand-500" />
-                    <h3 className="text-xl font-black">Correlativos de Comprobantes</h3>
+                    <h3 className="text-xl font-black text-white">Series y correlativos por sede{activeSede ? ' · ' + activeSede.nombre : ''}</h3>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <p className="text-sm text-gray-300 mb-4">Configura la serie y el siguiente número de nota de venta, boleta, factura y notas de crédito o débito.</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     {correlativos.map((c) => (
                         <div key={c.tipo} className="p-4 rounded-2xl bg-white/5 border border-white/10">
-                            <p className="text-xs uppercase text-brand-400 font-black">{c.tipo}</p>
+                            <p className="text-xs uppercase text-brand-400 font-black">{CORRELATIVO_LABEL[c.tipo] || (c.tipo === 'guia_remitente' ? 'Gu\u00eda de remisi\u00f3n remitente (SUNAT)' : c.tipo === 'guia_interna' ? 'Gu\u00eda interna' : c.tipo)}</p>
                             <p className="text-xl font-black mt-1">{c.serie}-{String(c.siguiente_numero).padStart(8, '0')}</p>
                             <button className="mt-3 text-xs px-3 py-2 rounded-lg bg-white/10 hover:bg-brand-600" onClick={() => openEditCorr(c)}>Editar</button>
                         </div>
@@ -403,6 +458,10 @@ const Settings = () => {
                         {zonas.map((z) => <div key={z.id} className="p-3 rounded-xl bg-gray-50 font-semibold">{z.nombre}</div>)}
                         {zonas.length === 0 && <p className="text-gray-500">No hay zonas.</p>}
                     </div>
+                    <form onSubmit={saveZona} className="flex gap-2 mt-4">
+                        <input className="input" placeholder="Nueva zona (ej. Terraza)" value={nuevaZona} onChange={(e) => setNuevaZona(e.target.value)} />
+                        <button type="submit" className="btn btn-primary text-xs px-3 py-2 shrink-0" disabled={!nuevaZona.trim()}><Plus size={14} /> Agregar</button>
+                    </form>
                 </div>
                 <div className="card p-6">
                     <div className="flex items-center justify-between mb-3">
@@ -435,11 +494,18 @@ const Settings = () => {
                         <h4 className="text-2xl font-black mb-5">{formUser.id ? 'Editar Usuario' : 'Nuevo Usuario'}</h4>
                         <form onSubmit={saveUser} className="space-y-4">
                             <input className="input" placeholder="Nombre" value={formUser.nombre} onChange={(e) => setFormUser({ ...formUser, nombre: e.target.value })} required />
+                            <input className="input" placeholder="Usuario para iniciar sesion" pattern="[A-Za-z0-9._\-]{3,50}" title="3 a 50 caracteres: letras, numeros, punto o guion" autoComplete="off" value={formUser.usuario} onChange={(e) => setFormUser({ ...formUser, usuario: e.target.value })} required />
                             <input className="input" type="email" placeholder="Email" value={formUser.email} onChange={(e) => setFormUser({ ...formUser, email: e.target.value })} required />
                             <select className="input" value={formUser.perfil} onChange={(e) => setFormUser({ ...formUser, perfil: e.target.value })}>
-                                {perfiles.map((p) => <option key={p} value={p}>{p}</option>)}
+                                {perfiles.map((p) => <option key={p} value={p}>{profileLabel(p)}</option>)}
                             </select>
-                            <input className="input" type="password" placeholder={formUser.id ? 'Nueva clave (opcional)' : 'Clave'} value={formUser.password} onChange={(e) => setFormUser({ ...formUser, password: e.target.value })} required={!formUser.id} />
+                            {isSuperadmin && formUser.perfil !== SUPERADMIN && (
+                                <select className="input" value={formUser.sede_id} onChange={(e) => setFormUser({ ...formUser, sede_id: e.target.value })} required={!perfilesMultisede.includes(formUser.perfil)}>
+                                    <option value="">{perfilesMultisede.includes(formUser.perfil) ? 'Todas las sedes (sin sede fija)' : 'Selecciona la sede'}</option>
+                                    {sedes.map((sede) => <option key={sede.id} value={sede.id}>{sede.nombre}</option>)}
+                                </select>
+                            )}
+                            <input className="input" type="password" autoComplete="new-password" placeholder={formUser.id ? 'Nueva clave (opcional)' : 'Clave'} value={formUser.password} onChange={(e) => setFormUser({ ...formUser, password: e.target.value })} required={!formUser.id} />
                             <div className="flex gap-3 pt-2">
                                 <button type="button" className="btn btn-secondary flex-1" onClick={() => setShowUserModal(false)}>Cancelar</button>
                                 <button type="submit" className="btn btn-primary flex-1">Guardar</button>
@@ -454,8 +520,10 @@ const Settings = () => {
                     <div className="bg-white rounded-3xl p-8 w-full max-w-md">
                         <h4 className="text-2xl font-black mb-5">Editar Correlativo {formCorr.tipo}</h4>
                         <form onSubmit={saveCorr} className="space-y-4">
-                            <input className="input" placeholder="Serie" maxLength={4} value={formCorr.serie} onChange={(e) => setFormCorr({ ...formCorr, serie: e.target.value })} required />
-                            <input className="input" type="number" min={1} placeholder="Siguiente numero" value={formCorr.siguiente_numero} onChange={(e) => setFormCorr({ ...formCorr, siguiente_numero: Number(e.target.value) || 1 })} required />
+                            <input className="input" placeholder="Serie" maxLength={formCorr.tipo === 'nota_venta' ? 10 : 4} value={formCorr.serie} onChange={(e) => setFormCorr({ ...formCorr, serie: e.target.value.toUpperCase() })} required />
+                            <label className="block text-sm font-semibold text-gray-600">Siguiente correlativo
+                                <input className="input mt-1" type="number" min={1} placeholder="Siguiente numero" value={formCorr.siguiente_numero} onChange={(e) => setFormCorr({ ...formCorr, siguiente_numero: Number(e.target.value) || 1 })} required />
+                            </label>
                             <div className="flex gap-3 pt-2">
                                 <button type="button" className="btn btn-secondary flex-1" onClick={() => setShowCorrModal(false)}>Cancelar</button>
                                 <button type="submit" className="btn btn-primary flex-1">Guardar</button>

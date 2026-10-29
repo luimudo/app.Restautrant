@@ -53,7 +53,7 @@ const KitchenPage = () => {
         pedidos.forEach(p => {
             if (p.detalles) {
                 p.detalles.forEach(d => {
-                    items.push({ ...d, mesa_numero: p.mesa_numero, pedido_id: p.id });
+                    items.push({ ...d, mesa_numero: p.mesa_numero, es_delivery: p.es_delivery, pedido_id: p.id });
                 });
             }
         });
@@ -73,7 +73,7 @@ const KitchenPage = () => {
             <div 
                 onDragOver={allowDrop} 
                 onDrop={(e) => onDrop(e, estado)}
-                className="flex-1 min-w-[320px] bg-gray-50/50 rounded-[2.5rem] p-6 border-2 border-dashed border-gray-200 flex flex-col h-full overflow-hidden"
+                className="flex-1 min-w-0 lg:min-w-[300px] bg-gray-50/50 rounded-[2.5rem] p-6 border-2 border-dashed border-gray-200 flex flex-col h-full overflow-hidden"
             >
                 <div className="flex items-center justify-between mb-6 px-2 shrink-0">
                     <div className="flex items-center gap-3">
@@ -101,7 +101,7 @@ const KitchenPage = () => {
                                 </div>
                                 
                                 <div className="mb-3 flex gap-2">
-                                    <span className="text-[10px] font-black uppercase bg-gray-100 px-2 py-0.5 rounded text-gray-500">Mesa {item.mesa_numero}</span>
+                                    <span className="text-[10px] font-black uppercase bg-gray-100 px-2 py-0.5 rounded text-gray-500">{item.es_delivery ? 'Delivery' : `Mesa ${item.mesa_numero}`}</span>
                                     <span className="text-[10px] font-black uppercase bg-brand-50 px-2 py-0.5 rounded text-brand-600">ID {item.pedido_id}</span>
                                 </div>
                                 
@@ -149,7 +149,7 @@ const KitchenPage = () => {
                 </div>
             </div>
 
-            <div className="flex-1 flex gap-6 overflow-x-auto pb-4 custom-scrollbar items-stretch">
+            <div className="flex-1 flex flex-col lg:flex-row gap-6 lg:overflow-x-auto pb-4 custom-scrollbar items-stretch">
                 {renderColumn("Recepción", "pendiente", "text-red-500", <Bell size={18} />)}
                 {renderColumn("En Preparación", "preparacion", "text-orange-500", <Play size={18} />)}
                 {renderColumn("Listo para Servir", "listo", "text-emerald-500", <CheckCircle2 size={18} />)}

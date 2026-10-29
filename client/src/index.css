@@ -138,3 +138,118 @@
     transform: translateY(0);
   }
 }
+/* ------------------------------------------------------------------
+   Adaptación a celulares, tablets y escritorio
+   ------------------------------------------------------------------ */
+
+html,
+body,
+#root {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Long words, codes and emails never push the page sideways. */
+td,
+th,
+p,
+h1,
+h2,
+h3,
+h4 {
+  overflow-wrap: anywhere;
+}
+
+table th {
+  white-space: nowrap;
+}
+
+/* Media never exceeds its container. */
+img,
+svg,
+canvas,
+video {
+  max-width: 100%;
+}
+
+@media (max-width: 640px) {
+  /* Page titles: smaller on phones. */
+  h2.text-4xl,
+  h2.text-3xl {
+    font-size: 1.75rem;
+    line-height: 2.1rem;
+  }
+
+  .card {
+    padding: 1rem;
+    border-radius: 1.5rem;
+  }
+
+  .card:hover {
+    transform: none;
+  }
+
+  .btn {
+    padding: 0.7rem 1rem;
+  }
+
+  /* 16 px avoids the automatic zoom of mobile browsers when focusing a field. */
+  .input,
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  /* Tables keep their columns and scroll inside their container. */
+  .overflow-x-auto > table {
+    min-width: 640px;
+  }
+
+  .overflow-x-auto > table td,
+  .overflow-x-auto > table th {
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
+  }
+}
+
+/* Touch screens: targets of at least 44 px. */
+@media (pointer: coarse) {
+  .btn,
+  button,
+  select,
+  .input {
+    min-height: 44px;
+  }
+
+  button:has(> svg:only-child) {
+    min-width: 44px;
+  }
+}
+
+/* Windows: never taller than the visible screen (mobile browser bars included). */
+.fixed.inset-0 > div[class*="max-h-["] {
+  max-height: calc(100dvh - 1.5rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  aside,
+  header {
+    display: none !important;
+  }
+
+  .overflow-x-auto {
+    overflow: visible !important;
+  }
+}

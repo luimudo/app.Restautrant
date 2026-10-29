@@ -1,60 +1,34 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'restaurant.db');
-
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// Hora de Peru (UTC-5, sin horario de verano) para Node y para MySQL, sin depender del equipo donde corra.
+process.env.TZ = process.env.APP_TIMEZONE || 'America/Lima';
+const MYSQL_TIME_ZONE = process.env.DB_TIME_ZONE || '-05:00';
 
 /**
- * Executes a SQL statement and returns results in mysql2-compatible format:
- *   SELECT → [rows, null]
- *   INSERT/UPDATE/DELETE → [{ insertId, affectedRows }, null]
+ * MySQL connection pool (mysql2).
+ *   pool.query(sql, params) → [rows, fields] for SELECT
+ *                           → [{ insertId, affectedRows }, fields] for INSERT/UPDATE/DELETE
+ *   pool.getConnection()    → connection with beginTransaction/commit/rollback/release
  */
-// mysql2 accepts JS booleans as bind params; better-sqlite3 only accepts
-// numbers, strings, bigints, buffers and null, so booleans must become 0/1.
-function normalizeParam(value) {
-    return typeof value === 'boolean' ? (value ? 1 : 0) : value;
-}
+const pool = mysql.createPool({
+    host: process.env.DB_HOST || 'localhost',
+    port: Number(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'restaurant_tinpu_db',
+    waitForConnections: true,
+    connectionLimit: Number(process.env.DB_CONNECTION_LIMIT) || 10,
+    charset: 'utf8mb4',
+    // DECIMAL columns come back as JS numbers (the frontend does arithmetic on them).
+    decimalNumbers: true,
+    // DATETIME se interpreta y envia en hora de Peru.
+    timezone: MYSQL_TIME_ZONE
+});
 
-function executeQuery(sql, params = []) {
-    const args = (Array.isArray(params) ? params : [params]).map(normalizeParam);
-    const verb = sql.trimStart().slice(0, 6).toUpperCase();
-
-    if (verb === 'SELECT' || verb === 'WITH   ' || verb === 'PRAGMA') {
-        const rows = db.prepare(sql).all(...args);
-        return [rows, null];
-    } else {
-        const result = db.prepare(sql).run(...args);
-        return [
-            { insertId: result.lastInsertRowid, affectedRows: result.changes },
-            null
-        ];
-    }
-}
-
-/**
- * Compatibility pool that mimics the mysql2 async pool API.
- * All SQLite operations are synchronous under the hood, so
- * transactions in index.js work safely in Node's single thread.
- */
-const pool = {
-    query: async (sql, params = []) => executeQuery(sql, params),
-    execute: async (sql, params = []) => executeQuery(sql, params),
-
-    getConnection: async () => ({
-        query: async (sql, params = []) => executeQuery(sql, params),
-        execute: async (sql, params = []) => executeQuery(sql, params),
-        beginTransaction: async () => db.prepare('BEGIN').run(),
-        commit: async () => db.prepare('COMMIT').run(),
-        rollback: async () => {
-            try { db.prepare('ROLLBACK').run(); } catch (_) { /* ignore if no tx */ }
-        },
-        release: () => {} // no-op: SQLite has no connection pool
-    })
-};
+// NOW(), CURDATE() y CURRENT_TIMESTAMP de cada conexion usan la hora de Peru.
+pool.pool.on('connection', (connection) => {
+    connection.query(`SET time_zone = '${MYSQL_TIME_ZONE}'`);
+});
 
 module.exports = pool;
-module.exports.db = db; // exposed for initDb.js direct usage

@@ -1,10 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { ChefHat, Plus, Trash2, Edit2, Search, Filter, UtensilsCrossed, Info, Tag, DollarSign, Check, X } from 'lucide-react';
+import { ChefHat, Plus, Trash2, Edit2, Search, Filter, UtensilsCrossed, Info, Tag, Download, Check, X, Power } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
+import { optimizeProductImage } from '../utils/productImage';
+import { descargarCarta } from '../utils/exportCarta';
+import { useUnidades } from '../hooks/useUnidades';
 
 const MenuManagement = () => {
-    const { activeUser } = useAuth();
+    const { activeUser, activeSede } = useAuth();
+    const { activas: unidadesActivas } = useUnidades(!!activeUser);
+    const [exporting, setExporting] = useState(false);
     const [productos, setProductos] = useState([]);
     const [categorias, setCategorias] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -14,6 +19,11 @@ const MenuManagement = () => {
     // Modals
     const [showProductForm, setShowProductForm] = useState(false);
     const [showCategoryForm, setShowCategoryForm] = useState(false);
+    const [imageData, setImageData] = useState('');
+    const [imagePreview, setImagePreview] = useState('');
+    const [removeImage, setRemoveImage] = useState(false);
+    const [productError, setProductError] = useState('');
+    const [savingProduct, setSavingProduct] = useState(false);
 
     // Form states
     const [currentProduct, setCurrentProduct] = useState({
@@ -53,6 +63,8 @@ const MenuManagement = () => {
 
     const handleSaveProduct = async (e) => {
         e.preventDefault();
+        setProductError('');
+        setSavingProduct(true);
         const url = currentProduct.id
             ? `/api/productos/${currentProduct.id}`
             : '/api/productos';
@@ -64,13 +76,85 @@ const MenuManagement = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(currentProduct)
             });
-            if (res.ok) {
-                setShowProductForm(false);
-                setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true });
-                fetchData();
+            const saved = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(saved.error || 'No se pudo guardar el producto.');
+            const productId = Number(currentProduct.id || saved.id);
+            if (!productId) throw new Error('El producto se guardó, pero no se recibió su identificador.');
+            setCurrentProduct((product) => ({ ...product, id: productId }));
+
+            if (imageData) {
+                const imageRes = await fetch(`/api/productos/${productId}/imagen`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ imagen_data: imageData })
+                });
+                const imageResult = await imageRes.json().catch(() => ({}));
+                if (!imageRes.ok) throw new Error(imageResult.error || 'El producto se guardó, pero no se pudo guardar la imagen.');
+            } else if (removeImage && currentProduct.id) {
+                const imageRes = await fetch(`/api/productos/${productId}/imagen`, { method: 'DELETE' });
+                if (!imageRes.ok) throw new Error('El producto se guardó, pero no se pudo quitar la imagen.');
             }
+            setShowProductForm(false);
+            setImageData('');
+            setImagePreview('');
+            setRemoveImage(false);
+            setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true });
+            fetchData();
         } catch (error) {
-            console.error('Error saving product:', error);
+            setProductError(error.message || 'No se pudo guardar el producto.');
+            fetchData();
+        } finally {
+            setSavingProduct(false);
+        }
+    };
+
+    const openNewProduct = () => {
+        setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true });
+        setImageData('');
+        setImagePreview('');
+        setRemoveImage(false);
+        setProductError('');
+        setShowProductForm(true);
+    };
+
+    const openEditProduct = (product) => {
+        setCurrentProduct(product);
+        setImageData('');
+        setImagePreview(product.imagen_url || '');
+        setRemoveImage(false);
+        setProductError('');
+        setShowProductForm(true);
+    };
+
+    const handleImageChange = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        setProductError('');
+        try {
+            const optimized = await optimizeProductImage(file);
+            setImageData(optimized);
+            setImagePreview(optimized);
+            setRemoveImage(false);
+        } catch (error) {
+            setProductError(error.message || 'No se pudo preparar la imagen.');
+        }
+    };
+
+    const handleToggleDisponible = async (producto) => {
+        try {
+            const res = await fetch(`/api/productos/${producto.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...producto, disponible: !producto.disponible })
+            });
+            if (!res.ok) {
+                const result = await res.json().catch(() => ({}));
+                throw new Error(result.error || 'No se pudo cambiar la disponibilidad.');
+            }
+            fetchData();
+        } catch (error) {
+            alert(error.message || 'No se pudo cambiar la disponibilidad.');
         }
     };
 
@@ -123,6 +207,18 @@ const MenuManagement = () => {
         return matchesSearch && matchesCategory;
     });
 
+    const exportarCarta = async () => {
+        setExporting(true);
+        try {
+            await descargarCarta({ sedeNombre: activeSede?.nombre || 'Sede', productos: filteredProductos });
+        } catch (error) {
+            console.error('Error exporting menu:', error);
+            alert('No se pudo generar el Excel de la carta.');
+        } finally {
+            setExporting(false);
+        }
+    };
+
     if (loading) return (
         <div className="flex flex-col items-center justify-center min-h-[400px]">
             <div className="w-16 h-16 border-4 border-brand-100 border-t-brand-600 rounded-full animate-spin"></div>
@@ -138,7 +234,14 @@ const MenuManagement = () => {
                     </h2>
                     <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Administra tus platos, bebidas y categorías del menú.</p>
                 </div>
-                <div className="flex gap-4">
+                <div className="flex flex-wrap gap-4">
+                    <button
+                        onClick={exportarCarta}
+                        disabled={exporting || filteredProductos.length === 0}
+                        className="btn btn-secondary"
+                    >
+                        <Download size={18} /> {exporting ? 'Generando...' : 'Excel'}
+                    </button>
                     <button
                         onClick={() => {
                             setCurrentCategory({ id: null, nombre: '', descripcion: '', es_barra: false });
@@ -149,10 +252,7 @@ const MenuManagement = () => {
                         <Tag size={18} /> Categorías
                     </button>
                     <button
-                        onClick={() => {
-                            setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true });
-                            setShowProductForm(true);
-                        }}
+                        onClick={openNewProduct}
                         className="btn btn-primary"
                     >
                         <Plus size={18} /> Nuevo Plato
@@ -195,20 +295,34 @@ const MenuManagement = () => {
                         className="card group flex flex-col bg-white hover:border-brand-300 transition-all relative overflow-hidden"
                     >
                         {!producto.disponible && (
-                            <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-10 flex items-center justify-center">
+                            <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-10 flex items-center justify-center pointer-events-none">
                                 <span className="bg-red-500 text-white px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest shadow-lg">Agotado</span>
+                            </div>
+                        )}
+                        {producto.imagen_url && (
+                            <div className="mb-4 aspect-[4/3] w-full overflow-hidden rounded-2xl bg-gray-50 border border-gray-100">
+                                <img
+                                    src={producto.imagen_url}
+                                    alt={producto.nombre}
+                                    loading="lazy"
+                                    className="h-full w-full object-contain object-center p-2"
+                                />
                             </div>
                         )}
                         <div className="flex justify-between items-start mb-4">
                             <div className="p-3 bg-brand-50 text-brand-600 rounded-2xl border border-brand-100">
                                 <ChefHat size={20} />
                             </div>
-                            <div className="flex gap-1">
+                            <div className="flex gap-1 relative z-20">
                                 <button
-                                    onClick={() => {
-                                        setCurrentProduct(producto);
-                                        setShowProductForm(true);
-                                    }}
+                                    onClick={() => handleToggleDisponible(producto)}
+                                    title={producto.disponible ? 'Deshabilitar (marcar agotado)' : 'Habilitar (marcar disponible)'}
+                                    className={`p-2 rounded-xl transition-all ${producto.disponible ? 'text-emerald-600 hover:bg-emerald-50' : 'text-gray-400 hover:text-emerald-600 hover:bg-emerald-50'}`}
+                                >
+                                    <Power size={16} />
+                                </button>
+                                <button
+                                    onClick={() => openEditProduct(producto)}
                                     className="p-2 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-xl transition-all"
                                 >
                                     <Edit2 size={16} />
@@ -255,7 +369,7 @@ const MenuManagement = () => {
                         <motion.div
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
-                            className="bg-white rounded-[2.5rem] p-10 max-w-lg w-full shadow-2xl relative overflow-hidden"
+                            className="bg-white rounded-[2.5rem] p-8 md:p-10 max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl relative"
                         >
                             <div className="absolute top-0 left-0 w-full h-2 bg-brand-600"></div>
                             <h3 className="text-3xl font-display font-black mb-8">{currentProduct.id ? 'Editar' : 'Nuevo'} Plato</h3>
@@ -305,6 +419,55 @@ const MenuManagement = () => {
                                         onChange={(e) => setCurrentProduct({ ...currentProduct, descripcion: e.target.value })}
                                     ></textarea>
                                 </div>
+                                <div className="space-y-3 rounded-2xl border border-gray-100 bg-gray-50 p-4">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <label className="text-sm font-bold text-[var(--text-secondary)]">Imagen del producto</label>
+                                        {imagePreview && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setImageData('');
+                                                    setImagePreview('');
+                                                    setRemoveImage(Boolean(currentProduct.id && currentProduct.imagen_url));
+                                                }}
+                                                className="text-xs font-bold text-red-600 hover:text-red-700"
+                                            >
+                                                Quitar imagen
+                                            </button>
+                                        )}
+                                    </div>
+                                    <label className="flex min-h-12 cursor-pointer items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white px-4 py-3 text-sm font-bold text-brand-700 hover:border-brand-400">
+                                        <input
+                                            type="file"
+                                            accept="image/jpeg,image/png,image/webp"
+                                            className="sr-only"
+                                            onChange={handleImageChange}
+                                        />
+                                        Seleccionar imagen
+                                    </label>
+                                    <p className="text-xs text-gray-500">JPG, PNG o WebP. Se optimiza y se muestra completa, sin recortar.</p>
+                                    {imagePreview && (
+                                        <div className="flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-xl border border-gray-200 bg-white p-2">
+                                            <img src={imagePreview} alt="Vista previa del producto" className="max-h-full max-w-full object-contain object-center" />
+                                        </div>
+                                    )}
+                                    {productError && <p role="alert" className="text-sm font-medium text-red-600">{productError}</p>}
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-bold text-[var(--text-secondary)]">Unidad de medida</label>
+                                    <select
+                                        className="input"
+                                        value={currentProduct.unidad_id || ''}
+                                        onChange={(e) => {
+                                            const elegida = unidadesActivas.find((u) => String(u.id) === e.target.value);
+                                            setCurrentProduct({ ...currentProduct, unidad_id: elegida?.id ?? '', unidad_medida: elegida?.abreviatura ?? currentProduct.unidad_medida });
+                                        }}
+                                    >
+                                        {!currentProduct.unidad_id && <option value="">{currentProduct.unidad_medida || 'Unidad'}</option>}
+                                        {unidadesActivas.map((u) => <option key={u.id} value={u.id}>{u.nombre} ({u.abreviatura})</option>)}
+                                    </select>
+                                    <p className="text-xs text-gray-500">Es la unidad que se envía a SUNAT en el comprobante electrónico.</p>
+                                </div>
                                 <div className="flex items-center gap-6 pt-2">
                                     <label className="flex items-center gap-3 cursor-pointer group">
                                         <input
@@ -326,8 +489,8 @@ const MenuManagement = () => {
                                     </label>
                                 </div>
                                 <div className="flex gap-4 pt-6">
-                                    <button type="button" onClick={() => setShowProductForm(false)} className="flex-1 btn btn-secondary">Cancelar</button>
-                                    <button type="submit" className="flex-1 btn btn-primary">Guardar Plato</button>
+                                    <button type="button" disabled={savingProduct} onClick={() => setShowProductForm(false)} className="flex-1 btn btn-secondary disabled:opacity-50">Cancelar</button>
+                                    <button type="submit" disabled={savingProduct} className="flex-1 btn btn-primary disabled:opacity-50">{savingProduct ? 'Guardando...' : 'Guardar Plato'}</button>
                                 </div>
                             </form>
                         </motion.div>

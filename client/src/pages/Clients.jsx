@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Plus, Edit, Trash2, UserPlus, Mail, Phone, CreditCard, ChevronRight, X } from 'lucide-react';
+import { Search, Plus, Edit, Trash2, UserPlus, Mail, Phone, CreditCard, ChevronRight, X, Download } from 'lucide-react';
+import { descargarClientes } from '../utils/exportContactos';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const Clients = () => {
@@ -7,6 +8,7 @@ const Clients = () => {
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [showModal, setShowModal] = useState(false);
+    const [exporting, setExporting] = useState(false);
     const [formData, setFormData] = useState({ nombre: '', telefono: '', email: '', documento: '' });
 
     useEffect(() => {
@@ -44,6 +46,18 @@ const Clients = () => {
         }
     };
 
+    const exportarExcel = async () => {
+        setExporting(true);
+        try {
+            await descargarClientes(filteredClients);
+        } catch (error) {
+            console.error('Error exporting clients:', error);
+            alert('No se pudo generar el archivo de clientes.');
+        } finally {
+            setExporting(false);
+        }
+    };
+
     const filteredClients = clients.filter(client =>
         client.nombre.toLowerCase().includes(searchTerm.toLowerCase()) ||
         client.documento.includes(searchTerm)
@@ -59,12 +73,17 @@ const Clients = () => {
                     </h2>
                     <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Administra y fideliza tu base de datos de comensales.</p>
                 </div>
-                <button
-                    onClick={() => setShowModal(true)}
-                    className="btn btn-primary"
-                >
-                    <UserPlus size={18} /> Nuevo Cliente
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                    <button type="button" onClick={exportarExcel} disabled={exporting || filteredClients.length === 0} className="btn btn-secondary flex items-center gap-2">
+                        <Download size={18} /> {exporting ? 'Generando...' : 'Excel'}
+                    </button>
+                    <button
+                        onClick={() => setShowModal(true)}
+                        className="btn btn-primary"
+                    >
+                        <UserPlus size={18} /> Nuevo Cliente
+                    </button>
+                </div>
             </div>
 
             {/* Content Card */}

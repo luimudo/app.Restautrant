@@ -1,21 +1,36 @@
 import React, { useState, useEffect } from 'react';
-import { Package, Search, AlertTriangle, ArrowUpRight, Coffee, Beer, Database, Plus, Edit2, Trash2, X, Save } from 'lucide-react';
+import { Package, Search, AlertTriangle, ArrowUpRight, Coffee, Beer, Database, Plus, Edit2, Trash2, X, Save, Download, Tags, Check, Ruler } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { descargarReporteInventario } from '../utils/exportInventario';
+import { Modal, Field, ErrorBox } from '../components/billing/billingShared';
+import { readJson } from '../components/billing/billingUtils';
+import MovimientosInventario from '../components/inventory/MovimientosInventario';
+import UnidadesModal from '../components/inventory/UnidadesModal';
+import { useUnidades } from '../hooks/useUnidades';
 
 const Inventory = () => {
     const navigate = useNavigate();
     const { activeUser } = useAuth();
+    const { unidades, activas: unidadesActivas, conversiones, recargar: recargarUnidades } = useUnidades(!!activeUser);
+    const [showUnidades, setShowUnidades] = useState(false);
     const [insumos, setInsumos] = useState([]);
     const [productosBar, setProductosBar] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [tab, setTab] = useState('insumos'); // 'insumos' or 'bar'
+    const [tab, setTab] = useState('insumos'); // 'insumos' | 'bar' | 'movimientos'
     const [searchTerm, setSearchTerm] = useState('');
+    const [exporting, setExporting] = useState(false);
+    const [categorias, setCategorias] = useState([]);
+    const [categoriaFiltro, setCategoriaFiltro] = useState('todas'); // 'todas' | 'sin' | category id
+    const [showCategorias, setShowCategorias] = useState(false);
+    const [nuevaCategoria, setNuevaCategoria] = useState(null); // null = closed, string = name being typed in the supply form
+    const [categoriaError, setCategoriaError] = useState('');
 
     // Modal & Form State
     const [showModal, setShowModal] = useState(false);
-    const [currentItem, setCurrentItem] = useState({ id: null, nombre: '', unidad_medida: 'Unidad', costo_unitario: 0, stock_actual: 0 });
+    const [currentItem, setCurrentItem] = useState({ id: null, nombre: '', unidad_medida: 'Unidad', costo_unitario: 0, stock_actual: 0, categoria_id: '' });
 
     useEffect(() => {
         if (!activeUser) return;
@@ -24,6 +39,7 @@ const Inventory = () => {
 
     const fetchData = async () => {
         try {
+            fetch('/api/categorias-insumo').then((r) => (r.ok ? r.json() : [])).then((rows) => setCategorias(Array.isArray(rows) ? rows : [])).catch(() => {});
             const [insRes, prodRes] = await Promise.all([
                 fetch('/api/insumos'),
                 fetch('/api/productos')
@@ -40,8 +56,9 @@ const Inventory = () => {
             const insData = await insRes.json();
             const prodData = await prodRes.json();
             setInsumos(Array.isArray(insData) ? insData : []);
+            // Finished products: bar categories or items not prepared from a recipe. Their stock may be negative.
             setProductosBar((Array.isArray(prodData) ? prodData : []).filter(p =>
-                p.es_barra === 1 || p.es_barra === true
+                p.es_barra === 1 || p.es_barra === true || !Number(p.es_receta)
             ));
         } catch (error) {
             console.error('Error fetching inventory:', error);
@@ -72,6 +89,21 @@ const Inventory = () => {
         }
     };
 
+    // Creates a category from the supply form and leaves it selected.
+    const crearCategoriaDesdeInsumo = async () => {
+        setCategoriaError('');
+        try {
+            const creada = await readJson(await fetch('/api/categorias-insumo', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nombre: nuevaCategoria })
+            }), 'No se pudo crear la categoría.');
+            setCategorias((prev) => [...prev, creada].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es')));
+            setCurrentItem((prev) => ({ ...prev, categoria_id: creada.id }));
+            setNuevaCategoria(null);
+        } catch (error) {
+            setCategoriaError(error.message);
+        }
+    };
+
     const handleDelete = async (id) => {
         if (!confirm('¿Estás seguro de eliminar este insumo?')) return;
         try {
@@ -79,6 +111,18 @@ const Inventory = () => {
             if (res.ok) fetchData();
         } catch (error) {
             console.error('Error deleting insumo:', error);
+        }
+    };
+
+    const exportarReporte = async () => {
+        setExporting(true);
+        try {
+            await descargarReporteInventario({ insumos, productosBar });
+        } catch (error) {
+            console.error('Error exporting inventory:', error);
+            alert('No se pudo generar el reporte de inventario.');
+        } finally {
+            setExporting(false);
         }
     };
 
@@ -92,6 +136,8 @@ const Inventory = () => {
     const currentData = tab === 'insumos' ? insumos : productosBar;
     const filteredData = currentData.filter(item =>
         item.nombre.toLowerCase().includes(searchTerm.toLowerCase())
+        && (tab !== 'insumos' || categoriaFiltro === 'todas'
+            || (categoriaFiltro === 'sin' ? !item.categoria_id : String(item.categoria_id) === categoriaFiltro))
     );
 
     return (
@@ -116,10 +162,19 @@ const Inventory = () => {
                         >
                             Barra / Bebidas
                         </button>
+                        <button
+                            onClick={() => setTab('movimientos')}
+                            className={`px-6 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${tab === 'movimientos' ? 'bg-gray-900 text-white shadow-lg shadow-gray-900/30' : 'text-gray-400 hover:text-gray-600'}`}
+                        >
+                            Movimientos
+                        </button>
                     </div>
                 </div>
             </div>
 
+            {tab === 'movimientos' ? (
+                <MovimientosInventario insumos={insumos} productos={productosBar} onChanged={fetchData} />
+            ) : (<>
             {/* Stats Summary */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="card bg-white p-6 flex items-center gap-6">
@@ -168,11 +223,36 @@ const Inventory = () => {
                             className="w-full pl-12 pr-4 py-3 bg-gray-50 border-transparent rounded-2xl text-sm focus:bg-white focus:ring-4 focus:ring-brand-500/10 transition-all outline-none"
                         />
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2 justify-end">
+                        {tab === 'insumos' && (
+                            <>
+                                <select
+                                    value={categoriaFiltro}
+                                    onChange={(e) => setCategoriaFiltro(e.target.value)}
+                                    aria-label="Filtrar por categoría"
+                                    className="px-4 py-3 bg-gray-50 rounded-2xl text-sm font-semibold outline-none focus:ring-4 focus:ring-brand-500/10"
+                                >
+                                    <option value="todas">Todas las categorías</option>
+                                    {categorias.map((c) => <option key={c.id} value={String(c.id)}>{c.nombre} ({c.insumos})</option>)}
+                                    <option value="sin">Sin categoría</option>
+                                </select>
+                                <button type="button" onClick={() => setShowCategorias(true)} className="btn btn-secondary flex items-center gap-2">
+                                    <Tags size={18} /> Categorías
+                                </button>
+                                <button type="button" onClick={() => setShowUnidades(true)} className="btn btn-secondary flex items-center gap-2">
+                                    <Ruler size={18} /> Unidades
+                                </button>
+                            </>
+                        )}
+                        <button type="button" onClick={exportarReporte} disabled={exporting} className="btn btn-secondary flex items-center gap-2">
+                            <Download size={18} /> {exporting ? 'Generando...' : 'Excel'}
+                        </button>
                         {tab === 'insumos' ? (
                             <button
                                 onClick={() => {
-                                    setCurrentItem({ id: null, nombre: '', unidad_medida: 'Unidad', costo_unitario: 0, stock_actual: 0 });
+                                    setCurrentItem({ id: null, nombre: '', unidad_medida: 'Unidad', costo_unitario: 0, stock_actual: 0, categoria_id: '' });
+                                    setNuevaCategoria(null);
+                                    setCategoriaError('');
                                     setShowModal(true);
                                 }}
                                 className="btn btn-primary flex items-center gap-2"
@@ -195,10 +275,10 @@ const Inventory = () => {
                         <thead>
                             <tr className="bg-gray-50/50">
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Item / Nombre</th>
+                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Categoría</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-center">Unidad</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-center">Stock Actual</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Costo / Precio</th>
-                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-center">Estado</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Acciones</th>
                             </tr>
                         </thead>
@@ -217,6 +297,15 @@ const Inventory = () => {
                                                 <span className="font-bold text-gray-900">{item.nombre}</span>
                                             </div>
                                         </td>
+                                        <td className="px-8 py-6 border-b border-gray-50">
+                                            {(tab === 'insumos' ? item.categoria_nombre : item.tipo_nombre) ? (
+                                                <span className={`inline-block px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border ${tab === 'insumos' ? 'bg-brand-50 text-brand-700 border-brand-100' : 'bg-blue-50 text-blue-700 border-blue-100'}`}>
+                                                    {tab === 'insumos' ? item.categoria_nombre : item.tipo_nombre}
+                                                </span>
+                                            ) : (
+                                                <span className="text-xs text-gray-300 font-semibold">Sin categoría</span>
+                                            )}
+                                        </td>
                                         <td className="px-8 py-6 border-b border-gray-50 text-center">
                                             <span className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
                                                 {item.unidad_medida || 'Unidad'}
@@ -229,17 +318,6 @@ const Inventory = () => {
                                         </td>
                                         <td className="px-8 py-6 border-b border-gray-50 text-right">
                                             <span className="font-black text-gray-900">S/ {(Number(item.costo_unitario) || Number(item.precio)).toFixed(2)}</span>
-                                        </td>
-                                        <td className="px-8 py-6 border-b border-gray-50 text-center">
-                                            {isLow ? (
-                                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-100 text-red-600 rounded-xl text-[10px] font-black uppercase tracking-wider">
-                                                    <AlertTriangle size={12} /> Crítico
-                                                </span>
-                                            ) : (
-                                                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 text-emerald-600 rounded-xl text-[10px] font-black uppercase tracking-wider">
-                                                    Saludable
-                                                </span>
-                                            )}
                                         </td>
                                         <td className="px-8 py-6 border-b border-gray-50 text-right">
                                             {tab === 'insumos' ? (
@@ -277,7 +355,10 @@ const Inventory = () => {
                 </div>
             </div>
 
+            </>)}
+
             {/* Modal Insumos */}
+            {createPortal(
             <AnimatePresence>
                 {showModal && (
                     <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
@@ -307,20 +388,58 @@ const Inventory = () => {
                                     />
                                 </div>
 
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] ml-1">Categoría</label>
+                                    {nuevaCategoria === null ? (
+                                        <div className="flex gap-2">
+                                            <select
+                                                className="input appearance-none flex-1"
+                                                value={currentItem.categoria_id ?? ''}
+                                                onChange={(e) => setCurrentItem({ ...currentItem, categoria_id: e.target.value })}
+                                            >
+                                                <option value="">Sin categoría</option>
+                                                {categorias.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                                            </select>
+                                            <button type="button" onClick={() => { setNuevaCategoria(''); setCategoriaError(''); }} className="btn btn-secondary flex items-center gap-1.5 whitespace-nowrap">
+                                                <Plus size={16} /> Nueva
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="text"
+                                                className="input flex-1"
+                                                value={nuevaCategoria}
+                                                onChange={(e) => setNuevaCategoria(e.target.value)}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); crearCategoriaDesdeInsumo(); } }}
+                                                placeholder="Ej: Carnes, Verduras, Lácteos"
+                                                maxLength={80}
+                                                autoFocus
+                                            />
+                                            <button type="button" onClick={crearCategoriaDesdeInsumo} disabled={nuevaCategoria.trim().length < 2} className="btn btn-primary flex items-center gap-1.5 disabled:opacity-50">
+                                                <Check size={16} /> Crear
+                                            </button>
+                                            <button type="button" onClick={() => { setNuevaCategoria(null); setCategoriaError(''); }} className="btn btn-secondary" aria-label="Cancelar nueva categoría">
+                                                <X size={16} />
+                                            </button>
+                                        </div>
+                                    )}
+                                    {categoriaError && <p className="text-xs font-semibold text-rose-600 ml-1">{categoriaError}</p>}
+                                </div>
+
                                 <div className="grid grid-cols-2 gap-4">
                                     <div className="space-y-2">
                                         <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] ml-1">Unidad de Medida</label>
                                         <select
                                             className="input appearance-none"
-                                            value={currentItem.unidad_medida}
-                                            onChange={(e) => setCurrentItem({ ...currentItem, unidad_medida: e.target.value })}
+                                            value={currentItem.unidad_id || ''}
+                                            onChange={(e) => {
+                                                const elegida = unidadesActivas.find((u) => String(u.id) === e.target.value);
+                                                setCurrentItem({ ...currentItem, unidad_id: elegida?.id ?? '', unidad_medida: elegida?.abreviatura ?? currentItem.unidad_medida });
+                                            }}
                                         >
-                                            <option value="Unidad">Unidad</option>
-                                            <option value="Kg">Kilogramos (Kg)</option>
-                                            <option value="Gr">Gramos (Gr)</option>
-                                            <option value="Lt">Litros (Lt)</option>
-                                            <option value="Ml">Mililitros (Ml)</option>
-                                            <option value="Paquete">Paquete</option>
+                                            {!currentItem.unidad_id && <option value="">{currentItem.unidad_medida || 'Unidad'}</option>}
+                                            {unidadesActivas.map((u) => <option key={u.id} value={u.id}>{u.nombre} ({u.abreviatura})</option>)}
                                         </select>
                                     </div>
                                     <div className="space-y-2">
@@ -357,8 +476,109 @@ const Inventory = () => {
                         </motion.div>
                     </div>
                 )}
-            </AnimatePresence>
+            </AnimatePresence>,
+            document.body
+            )}
+
+            {showUnidades && (
+                <UnidadesModal
+                    unidades={unidades}
+                    conversiones={conversiones}
+                    onClose={() => setShowUnidades(false)}
+                    onChanged={async () => { await recargarUnidades(); fetchData(); }}
+                />
+            )}
+
+            {showCategorias && (
+                <CategoriasModal
+                    categorias={categorias}
+                    onClose={() => setShowCategorias(false)}
+                    onChanged={(lista) => { setCategorias(lista); fetchData(); }}
+                />
+            )}
         </div>
+    );
+};
+
+/** Create, rename and delete supply categories. A category in use cannot be deleted. */
+const CategoriasModal = ({ categorias, onClose, onChanged }) => {
+    const [lista, setLista] = useState(categorias);
+    const [nueva, setNueva] = useState('');
+    const [editando, setEditando] = useState(null); // { id, nombre }
+    const [error, setError] = useState('');
+    const [busy, setBusy] = useState(false);
+
+    const recargar = async () => {
+        const rows = await readJson(await fetch('/api/categorias-insumo'), 'No se pudo cargar las categorías.');
+        setLista(rows);
+        onChanged(rows);
+    };
+
+    const ejecutar = async (accion) => {
+        setBusy(true);
+        setError('');
+        try {
+            await accion();
+            await recargar();
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const crear = (event) => {
+        event.preventDefault();
+        ejecutar(async () => {
+            await readJson(await fetch('/api/categorias-insumo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nombre: nueva }) }), 'No se pudo crear la categoría.');
+            setNueva('');
+        });
+    };
+
+    const renombrar = () => ejecutar(async () => {
+        await readJson(await fetch(`/api/categorias-insumo/${editando.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nombre: editando.nombre }) }), 'No se pudo renombrar la categoría.');
+        setEditando(null);
+    });
+
+    const eliminar = (categoria) => {
+        if (!window.confirm(`¿Eliminar la categoría "${categoria.nombre}"?`)) return;
+        ejecutar(async () => { await readJson(await fetch(`/api/categorias-insumo/${categoria.id}`, { method: 'DELETE' }), 'No se pudo eliminar la categoría.'); });
+    };
+
+    return (
+        <Modal title="Categorías de insumos" subtitle="Agrupa los insumos (carnes, verduras, lácteos...). Se comparten entre sedes." onClose={onClose}>
+            <ErrorBox text={error} />
+            <form onSubmit={crear} className="flex gap-2 mb-4">
+                <input className="input flex-1" placeholder="Nueva categoría" value={nueva} onChange={(e) => setNueva(e.target.value)} minLength={2} maxLength={80} required />
+                <button type="submit" className="btn btn-primary flex items-center gap-1.5" disabled={busy || nueva.trim().length < 2}><Plus size={16} /> Agregar</button>
+            </form>
+            <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                {lista.map((c) => (
+                    <div key={c.id} className="flex items-center gap-2 p-3 rounded-2xl border border-gray-100">
+                        {editando?.id === c.id ? (
+                            <>
+                                <input className="input flex-1" value={editando.nombre} onChange={(e) => setEditando({ ...editando, nombre: e.target.value })} minLength={2} maxLength={80} autoFocus
+                                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); renombrar(); } }} />
+                                <button type="button" className="p-2 text-emerald-600 hover:bg-emerald-50 rounded-xl" onClick={renombrar} disabled={busy} aria-label="Guardar nombre"><Check size={16} /></button>
+                                <button type="button" className="p-2 text-gray-400 hover:bg-gray-100 rounded-xl" onClick={() => setEditando(null)} aria-label="Cancelar"><X size={16} /></button>
+                            </>
+                        ) : (
+                            <>
+                                <div className="flex-1 min-w-0">
+                                    <p className="font-bold truncate">{c.nombre}</p>
+                                    <p className="text-xs text-gray-500">{c.insumos} insumo(s)</p>
+                                </div>
+                                <button type="button" className="p-2 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-xl" onClick={() => setEditando({ id: c.id, nombre: c.nombre })} aria-label={`Renombrar ${c.nombre}`}><Edit2 size={16} /></button>
+                                <button type="button" className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl disabled:opacity-30" onClick={() => eliminar(c)} disabled={busy || c.insumos > 0}
+                                    title={c.insumos > 0 ? 'Tiene insumos: cámbialos de categoría primero' : 'Eliminar'} aria-label={`Eliminar ${c.nombre}`}><Trash2 size={16} /></button>
+                            </>
+                        )}
+                    </div>
+                ))}
+                {lista.length === 0 && <p className="py-6 text-center text-sm text-gray-500">Aún no hay categorías. Crea la primera arriba.</p>}
+            </div>
+            <button type="button" className="btn btn-secondary w-full mt-5" onClick={onClose}>Cerrar</button>
+        </Modal>
     );
 };
 

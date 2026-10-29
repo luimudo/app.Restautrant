@@ -74,3 +74,11 @@ coverage/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
+
+# Copias de respaldo y archivos locales del hosting / editor
+respaldos/
+evidencia/
+site14.PublishSettings
+*.PublishSettings
+.claude/
+.publicacion-stage-*/

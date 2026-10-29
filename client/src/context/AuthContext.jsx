@@ -1,101 +1,157 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { canAccessModule, getDefaultRouteForProfile, normalizeProfile } from '../security/accessControl';
-import { ACTIVE_USER_ID_KEY, ACTIVE_USER_PROFILE_KEY } from './authStorage';
-
-const FALLBACK_ADMIN_USER = {
-    id: 0,
-    nombre: 'Administrador Local',
-    email: 'local@restaurant.com',
-    perfil: 'administrador'
-};
+import { canAccessModule, getDefaultRouteForUser, normalizeProfile, SUPERADMIN } from '../security/accessControl';
+import {
+    AUTH_EXPIRED_EVENT,
+    getStoredSedeId,
+    getStoredToken,
+    setStoredSedeId,
+    setStoredToken
+} from './authStorage';
 
 const AuthContext = createContext(null);
 
-const resolveInitialUser = (userList) => {
-    const storedRaw = localStorage.getItem(ACTIVE_USER_ID_KEY);
-    const storedId = storedRaw !== null ? Number(storedRaw) : null;
-    if (storedId !== null && !Number.isNaN(storedId)) {
-        const match = userList.find((user) => Number(user.id) === storedId);
-        if (match) return Number(match.id);
-    }
-    return userList.length > 0 ? Number(userList[0].id) : null;
+// A multisede user (superadmin, contador...) keeps the last chosen sede if it still exists, otherwise the first active one.
+const pickSedeForMultisede = (sedes) => {
+    const stored = getStoredSedeId();
+    if (stored && sedes.some((sede) => Number(sede.id) === stored)) return stored;
+    const firstActive = sedes.find((sede) => Number(sede.estado) === 1) || sedes[0];
+    return firstActive ? Number(firstActive.id) : null;
 };
 
 export const AuthProvider = ({ children }) => {
-    const [users, setUsers] = useState([]);
-    const [activeUserId, setActiveUserId] = useState(null);
+    const [activeUser, setActiveUser] = useState(null);
+    const [sedes, setSedes] = useState([]);
+    const [activeSedeId, setActiveSedeId] = useState(null);
+    const [perfilNombres, setPerfilNombres] = useState({});
     const [loading, setLoading] = useState(true);
 
-    useEffect(() => {
-        const loadUsers = async () => {
-            setLoading(true);
-            try {
-                const response = await fetch('/api/usuarios');
-                if (!response.ok) throw new Error('No se pudo cargar usuarios');
-                const data = await response.json();
-                const safeUsers = Array.isArray(data) && data.length > 0 ? data : [FALLBACK_ADMIN_USER];
+    const activeProfile = normalizeProfile(activeUser?.perfil) || null;
+    // Perfil base (administrador, mozo, caja o cocina): decide que operaciones puede hacer dentro de cada modulo.
+    const baseProfile = activeUser?.base || null;
+    const isSystemSuperadmin = activeProfile === SUPERADMIN;
+    // "Superadmin" en las pantallas = puede ver y elegir cualquier sede (super admin o perfil multisede como contador).
+    const isSuperadmin = isSystemSuperadmin || Boolean(activeUser?.multisede);
 
-                setUsers(safeUsers);
-                const initialId = resolveInitialUser(safeUsers);
-                setActiveUserId(initialId);
-                if (initialId !== null) localStorage.setItem(ACTIVE_USER_ID_KEY, String(initialId));
-            } catch (error) {
-                console.error('Error loading users for session:', error);
-                setUsers([FALLBACK_ADMIN_USER]);
-                setActiveUserId(FALLBACK_ADMIN_USER.id);
-                localStorage.setItem(ACTIVE_USER_ID_KEY, String(FALLBACK_ADMIN_USER.id));
-                localStorage.setItem(ACTIVE_USER_PROFILE_KEY, FALLBACK_ADMIN_USER.perfil);
+    const clearSession = useCallback(() => {
+        setStoredToken(null);
+        setStoredSedeId(null);
+        setActiveUser(null);
+        setSedes([]);
+        setActiveSedeId(null);
+    }, []);
+
+    // Loads the sedes visible to the user and fixes the active one.
+    const loadSedes = useCallback(async (user) => {
+        const response = await fetch('/api/sedes');
+        const data = response.ok ? await response.json() : [];
+        const list = Array.isArray(data) ? data : [];
+        setSedes(list);
+
+        const sedeId = (normalizeProfile(user?.perfil) === SUPERADMIN || user?.multisede)
+            ? pickSedeForMultisede(list)
+            : (user?.sede_id ?? null);
+        // Stored synchronously so the very next API call already carries x-sede-id.
+        setStoredSedeId(sedeId);
+        setActiveSedeId(sedeId);
+        return list;
+    }, []);
+
+    const startSession = useCallback(async (user) => {
+        await loadSedes(user);
+        try {
+            const response = await fetch('/api/perfiles/detalle');
+            const perfiles = response.ok ? await response.json() : [];
+            setPerfilNombres(Object.fromEntries((Array.isArray(perfiles) ? perfiles : []).map((p) => [p.codigo, p.nombre])));
+        } catch {
+            setPerfilNombres({});
+        }
+        setActiveUser(user);
+    }, [loadSedes]);
+
+    useEffect(() => {
+        const restore = async () => {
+            if (!getStoredToken()) {
+                setLoading(false);
+                return;
+            }
+            try {
+                const response = await fetch('/api/auth/me');
+                if (!response.ok) throw new Error('Sesion expirada');
+                await startSession(await response.json());
+            } catch {
+                clearSession();
             } finally {
                 setLoading(false);
             }
         };
-
-        loadUsers();
-    }, []);
+        restore();
+    }, [startSession, clearSession]);
 
     useEffect(() => {
-        if (activeUserId === null || Number.isNaN(Number(activeUserId))) return;
-        localStorage.setItem(ACTIVE_USER_ID_KEY, String(activeUserId));
-    }, [activeUserId]);
+        window.addEventListener(AUTH_EXPIRED_EVENT, clearSession);
+        return () => window.removeEventListener(AUTH_EXPIRED_EVENT, clearSession);
+    }, [clearSession]);
 
-    const switchUser = useCallback((userId) => {
-        const numericId = Number(userId);
-        if (Number.isNaN(numericId)) return;
-        setActiveUserId(numericId);
-    }, []);
+    const login = useCallback(async (usuario, password) => {
+        const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ usuario, password })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'No se pudo iniciar sesion');
+
+        setStoredToken(data.token);
+        setStoredSedeId(null);
+        await startSession(data.usuario);
+        return data.usuario;
+    }, [startSession]);
 
     const logout = useCallback(() => {
-        localStorage.removeItem(ACTIVE_USER_ID_KEY);
-        localStorage.removeItem(ACTIVE_USER_PROFILE_KEY);
-        setActiveUserId(null);
+        clearSession();
+    }, [clearSession]);
+
+    const selectSede = useCallback((sedeId) => {
+        if (!isSuperadmin) return;
+        const numericId = Number(sedeId);
+        if (!Number.isInteger(numericId) || numericId <= 0) return;
+        setStoredSedeId(numericId);
+        setActiveSedeId(numericId);
+    }, [isSuperadmin]);
+
+    // Vuelve a pedir el usuario: sus modulos cambian cuando se editan los permisos de su perfil.
+    const refreshUser = useCallback(async () => {
+        const response = await fetch('/api/auth/me');
+        if (response.ok) setActiveUser(await response.json());
     }, []);
 
-    const activeUser = useMemo(
-        () => users.find((user) => Number(user.id) === Number(activeUserId)) || null,
-        [users, activeUserId]
+    const reloadSedes = useCallback(() => loadSedes(activeUser), [loadSedes, activeUser]);
+
+    const activeSede = useMemo(
+        () => sedes.find((sede) => Number(sede.id) === Number(activeSedeId)) || null,
+        [sedes, activeSedeId]
     );
 
-    useEffect(() => {
-        if (!activeUser?.perfil) {
-            localStorage.removeItem(ACTIVE_USER_PROFILE_KEY);
-            return;
-        }
-        localStorage.setItem(ACTIVE_USER_PROFILE_KEY, String(activeUser.perfil));
-    }, [activeUser]);
-
-    const activeProfile = normalizeProfile(activeUser?.perfil) || null;
-
     const value = useMemo(() => ({
-        users,
         loading,
         activeUser,
-        activeUserId,
+        activeUserId: activeUser?.id ?? null,
         activeProfile,
-        switchUser,
+        baseProfile,
+        isSuperadmin,
+        isSystemSuperadmin,
+        profileLabel: (code) => perfilNombres[code] || code || 'sin perfil',
+        sedes,
+        activeSede,
+        activeSedeId,
+        selectSede,
+        reloadSedes,
+        refreshUser,
+        login,
         logout,
-        canAccess: (moduleKey) => canAccessModule(activeProfile, moduleKey),
-        defaultRoute: getDefaultRouteForProfile(activeProfile)
-    }), [users, loading, activeUser, activeUserId, activeProfile, switchUser, logout]);
+        canAccess: (moduleKey) => canAccessModule(activeUser, moduleKey),
+        defaultRoute: getDefaultRouteForUser(activeUser)
+    }), [loading, activeUser, activeProfile, baseProfile, isSuperadmin, isSystemSuperadmin, perfilNombres, sedes, activeSede, activeSedeId, selectSede, reloadSedes, refreshUser, login, logout]);
 
     return (
         <AuthContext.Provider value={value}>

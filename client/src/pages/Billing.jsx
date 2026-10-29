@@ -1,15 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, CreditCard, Receipt, Printer, Clock, Banknote, Landmark, X, Download, BarChart3, RefreshCw } from 'lucide-react';
+import { FileText, CreditCard, Receipt, Printer, Clock, Banknote, Landmark, X, Download, BarChart3, RefreshCw, Pencil, FileDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useAuth } from '../context/AuthContext';
+import { formatDateTime, formatTime, startOfMonthYmd, toPeruYmd } from '../utils/dateTime';
+import EmitirComprobanteModal from '../components/billing/EmitirComprobanteModal';
+import EditComandaModal from '../components/billing/EditComandaModal';
+import { descargarReporteVentasExcel } from '../utils/exportVentas';
+import { BotonesInformeArqueo, HistorialArqueos } from '../components/billing/ArqueoInformes';
+import ComprobantesPanel from '../components/billing/ComprobantesPanel';
 
 const Billing = () => {
     const { activeUser } = useAuth();
-    const activeUserId = activeUser?.id ? String(activeUser.id) : '';
 
     const [pedidos, setPedidos] = useState([]);
+    const [cobrarPedido, setCobrarPedido] = useState(null);
+    const [editarPedido, setEditarPedido] = useState(null);
+    const [comprobantesKey, setComprobantesKey] = useState(0);
     const [loading, setLoading] = useState(true);
     const [totalHoy, setTotalHoy] = useState(0);
     const [showSalesReport, setShowSalesReport] = useState(false);
@@ -17,31 +25,34 @@ const Billing = () => {
     const [salesReportError, setSalesReportError] = useState('');
     const [salesReport, setSalesReport] = useState(null);
     const [salesReportRange, setSalesReportRange] = useState(() => {
-        const now = new Date();
-        const end = now.toISOString().slice(0, 10);
-        const start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+        const end = toPeruYmd();
+        const start = startOfMonthYmd(end);
         return { desde: start, hasta: end };
     });
     const [showCashAudit, setShowCashAudit] = useState(false);
     const [cashAuditLoading, setCashAuditLoading] = useState(false);
     const [cashAuditError, setCashAuditError] = useState('');
+    const [showHistorialArqueos, setShowHistorialArqueos] = useState(false);
     const [cajas, setCajas] = useState([]);
     const [activeCashSession, setActiveCashSession] = useState(null);
     const [openSessionForm, setOpenSessionForm] = useState({
         caja_id: '',
+        // The cash count is done per shift: suggested from the current hour (Peru time).
+        turno: (() => {
+            const hora = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Lima', hour: '2-digit', hour12: false }).format(new Date()));
+            return hora < 12 ? 'Mañana' : hora < 18 ? 'Tarde' : 'Noche';
+        })(),
         monto_inicial: '0',
-        usuario_id: '',
         observaciones: ''
     });
     const [movementForm, setMovementForm] = useState({
         tipo: 'ingreso',
+        categoria: 'egreso',
         monto: '',
-        descripcion: '',
-        usuario_id: ''
+        descripcion: ''
     });
     const [closeSessionForm, setCloseSessionForm] = useState({
         monto_contado: '',
-        usuario_cierre_id: '',
         observaciones: ''
     });
 
@@ -49,14 +60,6 @@ const Billing = () => {
         fetchPedidos();
         fetchTotalHoy();
     }, []);
-
-    useEffect(() => {
-        if (!activeUserId) return;
-
-        setOpenSessionForm((prev) => ({ ...prev, usuario_id: activeUserId }));
-        setMovementForm((prev) => ({ ...prev, usuario_id: activeUserId }));
-        setCloseSessionForm((prev) => ({ ...prev, usuario_cierre_id: activeUserId }));
-    }, [activeUserId]);
 
     const fetchTotalHoy = async () => {
         try {
@@ -192,8 +195,8 @@ const Billing = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     caja_id: Number(openSessionForm.caja_id),
-                    usuario_id: Number(openSessionForm.usuario_id) || null,
                     monto_inicial: Number(openSessionForm.monto_inicial) || 0,
+                    turno: openSessionForm.turno,
                     observaciones: openSessionForm.observaciones
                 })
             });
@@ -226,9 +229,9 @@ const Billing = () => {
                 body: JSON.stringify({
                     sesion_id: activeCashSession.id,
                     tipo: movementForm.tipo,
+                    categoria: movementForm.tipo === 'egreso' ? movementForm.categoria : undefined,
                     monto: Number(movementForm.monto) || 0,
-                    descripcion: movementForm.descripcion,
-                    usuario_id: Number(movementForm.usuario_id) || null
+                    descripcion: movementForm.descripcion
                 })
             });
 
@@ -255,7 +258,6 @@ const Billing = () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     sesion_id: activeCashSession.id,
-                    usuario_cierre_id: Number(closeSessionForm.usuario_cierre_id) || null,
                     monto_contado: Number(closeSessionForm.monto_contado) || 0,
                     observaciones: closeSessionForm.observaciones
                 })
@@ -270,12 +272,30 @@ const Billing = () => {
             alert('Caja cerrada correctamente.');
             setCloseSessionForm({
                 monto_contado: '',
-                usuario_cierre_id: activeUserId,
                 observaciones: ''
             });
             await fetchCashAuditData();
         } catch (error) {
             setCashAuditError(error.message || 'No se pudo cerrar caja');
+        }
+    };
+
+    // Excel in the "Ventas · modelo Excel" format: one row per receipt of the selected range.
+    const [exportingSalesExcel, setExportingSalesExcel] = useState(false);
+    const exportSalesReportExcel = async () => {
+        setExportingSalesExcel(true);
+        setSalesReportError('');
+        try {
+            const params = new URLSearchParams({ desde: salesReportRange.desde, hasta: salesReportRange.hasta });
+            const res = await fetch(`/api/reportes/ventas/excel?${params}`);
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.error || 'No se pudo generar el Excel de ventas');
+            if (body.filas.length === 0) throw new Error('No hay ventas en el rango seleccionado');
+            await descargarReporteVentasExcel(body);
+        } catch (error) {
+            setSalesReportError(error.message || 'No se pudo generar el Excel de ventas');
+        } finally {
+            setExportingSalesExcel(false);
         }
     };
 
@@ -351,7 +371,7 @@ const Billing = () => {
                     row.mesa_numero ? `Mesa ${row.mesa_numero}` : '-',
                     row.cliente_nombre,
                     formatCurrency(row.total_venta),
-                    new Date(row.fecha_emision).toLocaleString()
+                    formatDateTime(row.fecha_emision)
                 ]),
                 styles: { fontSize: 8 }
             });
@@ -360,145 +380,14 @@ const Billing = () => {
         doc.save(`reporte_ventas_${salesReport.periodo.desde}_${salesReport.periodo.hasta}.pdf`);
     };
 
-    const processPayment = async (pedido, tipo) => {
-        try {
-            // 1. Obtener el pedido exacto con detalles para el PDF
-            const detailsRes = await fetch(`/api/pedidos/${pedido.id}/detalle`);
-            if (!detailsRes.ok) {
-                alert("No se pudieron obtener los detalles del pedido.");
-                return;
-            }
-            const orderWithDetails = await detailsRes.json();
-
-            // 2. Procesar el pago y obtener correlativo
-            const response = await fetch('/api/facturas', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    pedido_id: pedido.id,
-                    tipo_comprobante: tipo,
-                    cliente_id: pedido.cliente_id
-                })
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({}));
-                throw new Error(errorData.error || 'No se pudo generar el comprobante.');
-            }
-
-            const invoiceData = await response.json();
-
-            // 3. Generar PDF Oficial
-            generateInvoicePDF(orderWithDetails, invoiceData, tipo);
-
-            alert(`Comprobante ${invoiceData.numero} generado exitosamente.`);
-            setPedidos(pedidos.filter(p => p.id !== pedido.id));
-            fetchTotalHoy();
-            if (showCashAudit) {
-                fetchCashAuditData();
-            }
-        } catch (error) {
-            console.error('Error processing billing:', error);
-            alert("Error al procesar la facturación.");
+    // Called once the receipt is issued: the order leaves the pending list and totals refresh.
+    const handleEmitido = (factura) => {
+        setPedidos((prev) => prev.filter((p) => p.id !== factura.pedido_id));
+        setComprobantesKey((key) => key + 1);
+        fetchTotalHoy();
+        if (showCashAudit) {
+            fetchCashAuditData();
         }
-    };
-
-    const normalizeOrderDetails = (order) => {
-        const detalles = Array.isArray(order?.detalles) ? order.detalles : [];
-        return detalles.map((item, index) => {
-            const safeName = String(item?.producto_nombre ?? item?.nombre ?? `Producto ${index + 1}`);
-            const cantidad = Number(item?.cantidad) || 0;
-            const precio = Number(item?.precio ?? item?.precio_unitario) || 0;
-            return {
-                nombre: safeName,
-                cantidad,
-                total: cantidad * precio
-            };
-        });
-    };
-
-    const generateInvoicePDF = (order, invoice, tipo) => {
-        const doc = new jsPDF({
-            unit: 'mm',
-            format: [80, 200] // Formato ticketera largo
-        });
-
-        const margin = 5;
-        const width = 80;
-
-        // Cabecera Restaurante
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(12);
-        doc.text("GOURMET OS RESTAURANTE", 40, 10, { align: "center" });
-        doc.setFontSize(8);
-        doc.text("R.U.C. 20123456789", 40, 15, { align: "center" });
-        doc.setFont("helvetica", "normal");
-        doc.text("Av. Gastronomía 123 - Lima", 40, 19, { align: "center" });
-        doc.text("Telf: (01) 456-7890", 40, 23, { align: "center" });
-        
-        doc.text("------------------------------------------", 40, 27, { align: "center" });
-
-        // Datos del Comprobante
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(9);
-        const label = tipo === 'factura' ? 'FACTURA ELECTRÓNICA' : 'BOLETA DE VENTA ELECTRÓNICA';
-        doc.text(label, 40, 32, { align: "center" });
-        doc.text(invoice.numero, 40, 37, { align: "center" });
-        
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(7);
-        doc.text(`Fecha: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`, margin, 43);
-        doc.text(`Mesa: ${order.mesa_numero || order.mesa_id}`, margin, 47);
-        doc.text(`Cliente: ${order.cliente_nombre || 'PÚBLICO EN GENERAL'}`, margin, 51);
-        doc.text("------------------------------------------", 40, 55, { align: "center" });
-
-        // Detalle de productos
-        const normalizedDetails = normalizeOrderDetails(order);
-        const tableBody = normalizedDetails.map(item => [
-            `${item.cantidad} ${item.nombre.slice(0, 18)}`,
-            `S/ ${item.total.toFixed(2)}`
-        ]);
-
-        autoTable(doc, {
-            startY: 57,
-            body: tableBody,
-            theme: 'plain',
-            styles: { fontSize: 7, cellPadding: 0.5 },
-            columnStyles: {
-                0: { cellWidth: 50 },
-                1: { cellWidth: 20, halign: 'right' }
-            },
-            margin: { left: margin }
-        });
-
-        const finalY = doc.lastAutoTable.finalY + 5;
-        
-        // Totales
-        const total = Number(invoice.total);
-        const subtotal = total / 1.18;
-        const igv = total - subtotal;
-
-        doc.setFontSize(7);
-        doc.text(`OP. GRAVADA:`, 45, finalY, { align: "right" });
-        doc.text(`S/ ${subtotal.toFixed(2)}`, 75, finalY, { align: "right" });
-        
-        doc.text(`I.G.V. (18%):`, 45, finalY + 4, { align: "right" });
-        doc.text(`S/ ${igv.toFixed(2)}`, 75, finalY + 4, { align: "right" });
-        
-        doc.setFontSize(9);
-        doc.setFont("helvetica", "bold");
-        doc.text(`TOTAL A PAGAR:`, 45, finalY + 10, { align: "right" });
-        doc.text(`S/ ${total.toFixed(2)}`, 75, finalY + 10, { align: "right" });
-
-        // Pie de página
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(7);
-        doc.text("------------------------------------------", 40, finalY + 16, { align: "center" });
-        doc.text("Representación impresa de la", 40, finalY + 20, { align: "center" });
-        doc.text("Boleta de Venta Electrónica", 40, finalY + 23, { align: "center" });
-        doc.text("Gracias por su preferencia", 40, finalY + 28, { align: "center" });
-
-        doc.save(`${tipo}_${invoice.numero}.pdf`);
     };
 
     return (
@@ -548,13 +437,13 @@ const Billing = () => {
                                 <th className="px-6 py-4 text-center text-xs font-black uppercase tracking-[0.2em] text-[var(--text-muted)] border-b border-gray-100">Ubicación</th>
                                 <th className="px-6 py-4 text-center text-xs font-black uppercase tracking-[0.2em] text-[var(--text-muted)] border-b border-gray-100">Monto Total</th>
                                 <th className="px-6 py-4 text-center text-xs font-black uppercase tracking-[0.2em] text-[var(--text-muted)] border-b border-gray-100">Tiempo Transcurrido</th>
-                                <th className="px-6 py-4 text-center text-xs font-black uppercase tracking-[0.2em] text-[var(--text-muted)] border-b border-gray-100">Emitir Comprobante</th>
+                                <th className="px-6 py-4 text-center text-xs font-black uppercase tracking-[0.2em] text-[var(--text-muted)] border-b border-gray-100">Acciones</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-50">
                             {loading ? (
                                 <tr>
-                                    <td colSpan="5" className="px-6 py-20 text-center">
+                                    <td colSpan="6" className="px-6 py-20 text-center">
                                         <div className="flex flex-col items-center">
                                             <div className="w-10 h-10 border-4 border-brand-100 border-t-brand-600 rounded-full animate-spin mb-4"></div>
                                             <p className="font-bold text-gray-500 font-display">Sincronizando caja...</p>
@@ -563,7 +452,7 @@ const Billing = () => {
                                 </tr>
                             ) : pedidos.length === 0 ? (
                                 <tr>
-                                    <td colSpan="5" className="px-6 py-20 text-center">
+                                    <td colSpan="6" className="px-6 py-20 text-center">
                                         <div className="flex flex-col items-center max-w-sm mx-auto">
                                             <div className="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mb-6 border-2 border-dashed border-gray-200">
                                                 <CreditCard size={32} className="text-gray-300" />
@@ -588,14 +477,14 @@ const Billing = () => {
                                                     #{pedido.id}
                                                 </div>
                                                 <div>
-                                                    <p className="font-black text-gray-900 leading-none">Venta Directa</p>
-                                                    <p className="text-[10px] font-bold text-brand-600 mt-1 uppercase tracking-widest leading-none">Pedido de Comedor</p>
+                                                    <p className="font-black text-gray-900 leading-none">{pedido.es_delivery ? (pedido.delivery_cliente || 'Delivery') : 'Venta Directa'}</p>
+                                                    <p className="text-[10px] font-bold text-brand-600 mt-1 uppercase tracking-widest leading-none">{pedido.es_delivery ? `Delivery · ${pedido.delivery_estado}` : 'Pedido de Comedor'}</p>
                                                 </div>
                                             </div>
                                         </td>
                                         <td className="px-6 py-5 text-center">
                                             <span className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase tracking-widest border border-gray-200">
-                                                Mesa {pedido.mesa_id}
+                                                {pedido.es_delivery ? 'Delivery' : `Mesa ${pedido.mesa_id}`}
                                             </span>
                                         </td>
                                         <td className="px-6 py-5 text-center">
@@ -606,7 +495,7 @@ const Billing = () => {
                                             <div className="flex flex-col items-center gap-1.5 text-xs font-semibold text-gray-500">
                                                 <div className="flex items-center gap-1.5">
                                                     <Clock size={12} className="text-brand-500" />
-                                                    {new Date(pedido.fecha_creacion).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    {formatTime(pedido.fecha_creacion)}
                                                 </div>
                                                 <p className="text-[10px] font-bold uppercase text-gray-400">Hace 12 min</p>
                                             </div>
@@ -614,16 +503,16 @@ const Billing = () => {
                                         <td className="px-6 py-5">
                                             <div className="flex items-center justify-center gap-3">
                                                 <button
-                                                    onClick={() => processPayment(pedido, 'boleta')}
-                                                    className="px-4 py-2.5 bg-white border border-brand-200 text-brand-600 rounded-xl text-xs font-bold hover:bg-brand-600 hover:text-white hover:shadow-lg hover:shadow-brand-100 transition-all flex items-center gap-2 group/btn"
+                                                    onClick={() => setEditarPedido(pedido)}
+                                                    className="px-4 py-2.5 border border-gray-200 bg-white text-gray-700 rounded-xl text-xs font-bold hover:border-brand-300 hover:text-brand-700 transition-all flex items-center gap-2"
                                                 >
-                                                    <FileText size={14} className="group-hover/btn:rotate-12 transition-transform" /> Boleta
+                                                    <Pencil size={14} /> Editar
                                                 </button>
                                                 <button
-                                                    onClick={() => processPayment(pedido, 'factura')}
-                                                    className="px-4 py-2.5 bg-brand-600 text-white rounded-xl text-xs font-bold hover:bg-brand-700 hover:shadow-lg hover:shadow-brand-200 transition-all flex items-center gap-2"
+                                                    onClick={() => setCobrarPedido(pedido)}
+                                                    className="px-5 py-2.5 bg-brand-600 text-white rounded-xl text-xs font-bold hover:bg-brand-700 hover:shadow-lg hover:shadow-brand-200 transition-all flex items-center gap-2"
                                                 >
-                                                    <Landmark size={14} /> Factura
+                                                    <Receipt size={14} /> Cobrar
                                                 </button>
                                             </div>
                                         </td>
@@ -634,6 +523,8 @@ const Billing = () => {
                     </table>
                 </div>
             </div>
+
+            <ComprobantesPanel refreshKey={comprobantesKey} onChanged={() => { fetchTotalHoy(); if (showCashAudit) fetchCashAuditData(); }} />
 
             {/* Quick Actions / Statistics */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -662,6 +553,23 @@ const Billing = () => {
                 </div>
             </div>
 
+            {editarPedido && (
+                <EditComandaModal
+                    pedido={editarPedido}
+                    onClose={() => setEditarPedido(null)}
+                    onSaved={() => {
+                        setEditarPedido(null);
+                        fetchPedidos();
+                    }}
+                />
+            )}
+
+            {showHistorialArqueos && <HistorialArqueos onClose={() => setShowHistorialArqueos(false)} />}
+
+            {cobrarPedido && (
+                <EmitirComprobanteModal pedido={cobrarPedido} onClose={() => setCobrarPedido(null)} onEmitido={handleEmitido} />
+            )}
+
             <AnimatePresence>
                 {showCashAudit && (
                     <motion.div
@@ -685,6 +593,13 @@ const Billing = () => {
                                     <p className="text-sm text-gray-500 font-medium">Apertura, movimientos manuales y cierre de caja con diferencia.</p>
                                 </div>
                                 <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowHistorialArqueos(true)}
+                                        className="px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-bold flex items-center gap-2"
+                                    >
+                                        <FileDown size={16} /> Historial e informes
+                                    </button>
                                     <button
                                         type="button"
                                         onClick={fetchCashAuditData}
@@ -747,14 +662,17 @@ const Billing = () => {
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">Usuario Apertura (ID)</label>
-                                                    <input
-                                                        type="number"
-                                                        min="1"
+                                                    <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">Turno</label>
+                                                    <select
                                                         className="w-full px-3 py-2.5 rounded-xl border border-gray-200 font-medium text-sm"
-                                                        value={openSessionForm.usuario_id}
-                                                        onChange={(e) => setOpenSessionForm((prev) => ({ ...prev, usuario_id: e.target.value }))}
-                                                    />
+                                                        value={openSessionForm.turno}
+                                                        onChange={(e) => setOpenSessionForm((prev) => ({ ...prev, turno: e.target.value }))}
+                                                    >
+                                                        <option value="Mañana">Mañana</option>
+                                                        <option value="Tarde">Tarde</option>
+                                                        <option value="Noche">Noche</option>
+                                                        <option value="">Sin turno</option>
+                                                    </select>
                                                 </div>
                                                 <div>
                                                     <label className="block text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">Observaciones</label>
@@ -785,9 +703,16 @@ const Billing = () => {
                                             <span className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-black uppercase">
                                                 {activeCashSession.estado}
                                             </span>
+                                            {activeCashSession.turno && (
+                                                <span className="px-3 py-1.5 rounded-lg bg-sky-50 text-sky-700 text-xs font-black uppercase">Turno {activeCashSession.turno}</span>
+                                            )}
                                             <span className="text-xs font-bold text-gray-500">
                                                 Caja: {activeCashSession.caja_descripcion || activeCashSession.caja_id}
                                             </span>
+                                            <div className="ml-auto flex items-center gap-2">
+                                                <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Informe de movimientos</span>
+                                                <BotonesInformeArqueo sesionId={activeCashSession.id} compacto onError={setCashAuditError} />
+                                            </div>
                                         </div>
 
                                         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -795,6 +720,8 @@ const Billing = () => {
                                             <SummaryCard title="Ingresos Manuales" value={formatCurrency(activeCashSession.resumen?.ingresos_manual)} />
                                             <SummaryCard title="Egresos Manuales" value={formatCurrency(activeCashSession.resumen?.egresos_manual)} />
                                             <SummaryCard title="Ventas Facturadas" value={formatCurrency(activeCashSession.resumen?.ventas_totales)} />
+                                            <SummaryCard title="Cobros en Efectivo" value={formatCurrency(activeCashSession.resumen?.cobros_efectivo)} />
+                                            <SummaryCard title="Cobros Tarjeta / Digital" value={formatCurrency(activeCashSession.resumen?.cobros_otros)} />
                                             <SummaryCard title="Monto Teorico" value={formatCurrency(activeCashSession.resumen?.monto_teorico)} highlight />
                                             <SummaryCard title="Comprobantes" value={String(activeCashSession.resumen?.comprobantes || 0)} />
                                         </div>
@@ -823,20 +750,23 @@ const Billing = () => {
                                                             required
                                                         />
                                                     </div>
+                                                    {movementForm.tipo === 'egreso' && (
+                                                        <select
+                                                            className="w-full px-3 py-2.5 rounded-xl border border-gray-200 font-medium text-sm"
+                                                            value={movementForm.categoria}
+                                                            onChange={(e) => setMovementForm((prev) => ({ ...prev, categoria: e.target.value }))}
+                                                            aria-label="Tipo de egreso"
+                                                        >
+                                                            <option value="egreso">Egreso (gasto menor de la caja)</option>
+                                                            <option value="retiro">Retiro / entrega de caja</option>
+                                                        </select>
+                                                    )}
                                                     <input
                                                         type="text"
                                                         placeholder="Descripcion"
                                                         className="w-full px-3 py-2.5 rounded-xl border border-gray-200 font-medium text-sm"
                                                         value={movementForm.descripcion}
                                                         onChange={(e) => setMovementForm((prev) => ({ ...prev, descripcion: e.target.value }))}
-                                                    />
-                                                    <input
-                                                        type="number"
-                                                        min="1"
-                                                        placeholder="Usuario ID"
-                                                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 font-medium text-sm"
-                                                        value={movementForm.usuario_id}
-                                                        onChange={(e) => setMovementForm((prev) => ({ ...prev, usuario_id: e.target.value }))}
                                                     />
                                                     <button
                                                         type="submit"
@@ -859,14 +789,6 @@ const Billing = () => {
                                                         value={closeSessionForm.monto_contado}
                                                         onChange={(e) => setCloseSessionForm((prev) => ({ ...prev, monto_contado: e.target.value }))}
                                                         required
-                                                    />
-                                                    <input
-                                                        type="number"
-                                                        min="1"
-                                                        placeholder="Usuario cierre ID"
-                                                        className="w-full px-3 py-2.5 rounded-xl border border-gray-200 font-medium text-sm"
-                                                        value={closeSessionForm.usuario_cierre_id}
-                                                        onChange={(e) => setCloseSessionForm((prev) => ({ ...prev, usuario_cierre_id: e.target.value }))}
                                                     />
                                                     <input
                                                         type="text"
@@ -905,7 +827,7 @@ const Billing = () => {
                                                                 <td className="px-4 py-3 font-semibold uppercase">{item.tipo}</td>
                                                                 <td className="px-4 py-3">{item.descripcion || '-'}</td>
                                                                 <td className="px-4 py-3 text-right font-semibold">{formatCurrency(item.monto)}</td>
-                                                                <td className="px-4 py-3 text-right">{new Date(item.fecha).toLocaleString()}</td>
+                                                                <td className="px-4 py-3 text-right">{formatDateTime(item.fecha)}</td>
                                                             </tr>
                                                         ))}
                                                         {(activeCashSession.movimientos || []).length === 0 && (
@@ -984,6 +906,13 @@ const Billing = () => {
                                         className="px-4 py-2.5 rounded-xl border border-gray-300 text-gray-700 text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-50"
                                     >
                                         <Download size={16} /> Exportar PDF
+                                    </button>
+                                    <button
+                                        onClick={exportSalesReportExcel}
+                                        disabled={exportingSalesExcel}
+                                        className="px-4 py-2.5 rounded-xl border border-green-700 bg-green-700 text-white text-sm font-bold flex items-center justify-center gap-2 disabled:opacity-50"
+                                    >
+                                        <Download size={16} /> {exportingSalesExcel ? 'Generando...' : 'Exportar Excel'}
                                     </button>
                                 </div>
 
@@ -1096,7 +1025,7 @@ const Billing = () => {
                                                                 <td className="px-4 py-3">{item.mesa_numero ? `Mesa ${item.mesa_numero}` : '-'}</td>
                                                                 <td className="px-4 py-3">{item.cliente_nombre}</td>
                                                                 <td className="px-4 py-3 text-right font-semibold">{formatCurrency(item.total_venta)}</td>
-                                                                <td className="px-4 py-3 text-right">{new Date(item.fecha_emision).toLocaleString()}</td>
+                                                                <td className="px-4 py-3 text-right">{formatDateTime(item.fecha_emision)}</td>
                                                             </tr>
                                                         ))}
                                                     </tbody>

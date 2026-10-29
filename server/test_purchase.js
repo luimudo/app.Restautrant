@@ -5,8 +5,8 @@ async function test() {
     try {
         await connection.beginTransaction();
         const [compraResult] = await connection.query(
-            'INSERT INTO compras (proveedor_id, total, numero_factura_proveedor, estado) VALUES (?, ?, ?, ?)',
-            [1, 10.5, 'TEST-001', 'recibido']
+            'INSERT INTO compras (sede_id, proveedor_id, total, numero_factura_proveedor, estado) VALUES (?, ?, ?, ?, ?)',
+            [1, 1, 10.5, 'TEST-001', 'recibido']
         );
         const compraId = compraResult.insertId;
         console.log('Compra Header OK, ID:', compraId);
@@ -18,7 +18,7 @@ async function test() {
         console.log('Detalle OK');
 
         await connection.query(
-            'UPDATE productos SET stock = stock + ? WHERE id = ?',
+            'UPDATE stock_productos SET stock = stock + ? WHERE sede_id = 1 AND producto_id = ?',
             [1, 3]
         );
         console.log('Stock Update OK');

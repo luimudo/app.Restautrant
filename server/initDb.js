@@ -1,28 +1,40 @@
-const Database = require('better-sqlite3');
+const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'restaurant.db');
+const DB_NAME = process.env.DB_NAME || 'restaurant_tinpu_db';
 
-function initDb() {
-    console.log('Initializing SQLite database...');
+async function initDb() {
+    console.log(`Initializing MySQL database "${DB_NAME}"...`);
 
-    const db = new Database(DB_PATH);
+    const connection = await mysql.createConnection({
+        host: process.env.DB_HOST || 'localhost',
+        port: Number(process.env.DB_PORT) || 3306,
+        user: process.env.DB_USER || 'root',
+        password: process.env.DB_PASSWORD || '',
+        charset: 'utf8mb4',
+        multipleStatements: true
+    });
 
     try {
+        await connection.query(
+            `CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+        );
+        await connection.query(`USE \`${DB_NAME}\``);
+
         const sqlPath = path.join(__dirname, '../database.sql');
         const sql = fs.readFileSync(sqlPath, 'utf8');
 
         console.log(`Executing SQL from ${sqlPath}...`);
-        db.exec(sql);
+        await connection.query(sql);
 
         console.log('Database initialized successfully!');
     } catch (error) {
         console.error('Error initializing database:', error);
-        process.exit(1);
+        process.exitCode = 1;
     } finally {
-        db.close();
+        await connection.end();
     }
 }
 

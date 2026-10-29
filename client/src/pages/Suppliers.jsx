@@ -1,19 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Search, Plus, Edit2, Trash2, X, Save, Phone, MapPin, CreditCard, Building2, UserCircle } from 'lucide-react';
+import { Users, Search, Plus, Edit2, Trash2, X, Save, Phone, MapPin, CreditCard, Building2, UserCircle, Download } from 'lucide-react';
+import { descargarProveedores } from '../utils/exportContactos';
 import { motion, AnimatePresence } from 'framer-motion';
+import { createPortal } from 'react-dom';
 
 const Suppliers = () => {
     const [suppliers, setSuppliers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [showModal, setShowModal] = useState(false);
+    const [exporting, setExporting] = useState(false);
     const [currentSupplier, setCurrentSupplier] = useState({
         id: null,
         razon_social: '',
         ruc: '',
         contacto: '',
         direccion: '',
-        telefono: ''
+        telefono: '',
+        nro_cuenta: '',
+        observaciones: ''
     });
 
     useEffect(() => {
@@ -69,6 +74,18 @@ const Suppliers = () => {
         }
     };
 
+    const exportarExcel = async () => {
+        setExporting(true);
+        try {
+            await descargarProveedores(filteredSuppliers);
+        } catch (error) {
+            console.error('Error exporting suppliers:', error);
+            alert('No se pudo generar el archivo de proveedores.');
+        } finally {
+            setExporting(false);
+        }
+    };
+
     const filteredSuppliers = suppliers.filter(s =>
         (s.razon_social || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
         (s.ruc || '').includes(searchTerm) ||
@@ -89,15 +106,20 @@ const Suppliers = () => {
                     <h2 className="text-4xl font-display font-black uppercase tracking-tight">Gestión de <span className="text-brand-600">Proveedores</span></h2>
                     <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Administra tus contactos comerciales y fuentes de abastecimiento.</p>
                 </div>
+                <div className="flex flex-wrap items-center gap-3">
+                <button type="button" onClick={exportarExcel} disabled={exporting || filteredSuppliers.length === 0} className="btn btn-secondary flex items-center gap-2 px-6 py-4 rounded-2xl">
+                    <Download size={20} /> {exporting ? 'Generando...' : 'Excel'}
+                </button>
                 <button
                     onClick={() => {
-                        setCurrentSupplier({ id: null, razon_social: '', ruc: '', contacto: '', direccion: '', telefono: '' });
+                        setCurrentSupplier({ id: null, razon_social: '', ruc: '', contacto: '', direccion: '', telefono: '', nro_cuenta: '', observaciones: '' });
                         setShowModal(true);
                     }}
                     className="btn btn-primary flex items-center gap-2 px-8 py-4 rounded-2xl shadow-lg shadow-brand-500/30"
                 >
                     <Plus size={20} /> Nuevo Proveedor
                 </button>
+                </div>
             </div>
 
             <div className="card bg-white p-0 overflow-hidden">
@@ -115,57 +137,51 @@ const Suppliers = () => {
                 </div>
 
                 <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
+                    <table className="w-full text-left border-collapse min-w-[1100px]">
                         <thead>
                             <tr className="bg-gray-50/50">
-                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Razón Social</th>
-                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">RUC / Identificación</th>
-                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Contacto / Teléfono</th>
-                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Acciones</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Razón Social</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">RUC</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Contacto</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Teléfono</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Dirección</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">N° de Cuenta</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Observaciones</th>
+                                <th className="px-5 py-4 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Acciones</th>
                             </tr>
                         </thead>
                         <tbody>
                             {filteredSuppliers.map(supplier => (
-                                <tr key={supplier.id} className="group hover:bg-gray-50/80 transition-colors">
-                                    <td className="px-8 py-6 border-b border-gray-50">
-                                        <div className="flex items-center gap-4">
-                                            <div className="p-3 rounded-2xl bg-brand-50 text-brand-600">
-                                                <Building2 size={18} />
+                                <tr key={supplier.id} className="group hover:bg-gray-50/80 transition-colors align-top">
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm">
+                                        <div className="flex items-center gap-3">
+                                            <div className="p-2.5 rounded-xl bg-brand-50 text-brand-600 shrink-0">
+                                                <Building2 size={16} />
                                             </div>
                                             <span className="font-bold text-gray-900">{supplier.razon_social}</span>
                                         </div>
                                     </td>
-                                    <td className="px-8 py-6 border-b border-gray-50">
-                                        <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
-                                            <CreditCard size={14} className="text-gray-400" />
-                                            {supplier.ruc}
-                                        </div>
-                                    </td>
-                                    <td className="px-8 py-6 border-b border-gray-50">
-                                        <div className="space-y-1">
-                                            <div className="flex items-center gap-2 text-xs text-gray-600 font-bold">
-                                                <UserCircle size={12} className="text-brand-500" />
-                                                {supplier.contacto || 'Sin contacto'}
-                                            </div>
-                                            <div className="flex items-center gap-2 text-xs text-gray-500">
-                                                <Phone size={12} className="text-gray-400" />
-                                                {supplier.telefono}
-                                            </div>
-                                        </div>
-                                    </td>
-                                    <td className="px-8 py-6 border-b border-gray-50 text-right">
-                                        <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm font-medium text-gray-700 whitespace-nowrap">{supplier.ruc}</td>
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm text-gray-700">{supplier.contacto || <span className="text-gray-300">—</span>}</td>
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm text-gray-700 whitespace-nowrap">{supplier.telefono || <span className="text-gray-300">—</span>}</td>
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm text-gray-600 max-w-[220px]">{supplier.direccion || <span className="text-gray-300">—</span>}</td>
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm font-mono text-gray-700 whitespace-nowrap">{supplier.nro_cuenta || <span className="text-gray-300">—</span>}</td>
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm text-gray-600 max-w-[260px]">{supplier.observaciones || <span className="text-gray-300">—</span>}</td>
+                                    <td className="px-5 py-5 border-b border-gray-50 text-sm text-right">
+                                        <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                             <button
                                                 onClick={() => {
-                                                    setCurrentSupplier(supplier);
+                                                    setCurrentSupplier({ ...supplier, contacto: supplier.contacto || '', telefono: supplier.telefono || '', direccion: supplier.direccion || '', nro_cuenta: supplier.nro_cuenta || '', observaciones: supplier.observaciones || '' });
                                                     setShowModal(true);
                                                 }}
+                                                aria-label={`Editar ${supplier.razon_social}`}
                                                 className="p-2 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-xl transition-all"
                                             >
                                                 <Edit2 size={16} />
                                             </button>
                                             <button
                                                 onClick={() => handleDelete(supplier.id)}
+                                                aria-label={`Eliminar ${supplier.razon_social}`}
                                                 className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
                                             >
                                                 <Trash2 size={16} />
@@ -174,21 +190,25 @@ const Suppliers = () => {
                                     </td>
                                 </tr>
                             ))}
+                            {filteredSuppliers.length === 0 && (
+                                <tr><td colSpan={8} className="py-12 text-center text-gray-500">No hay proveedores que coincidan.</td></tr>
+                            )}
                         </tbody>
                     </table>
                 </div>
             </div>
 
+            {createPortal(
             <AnimatePresence>
                 {showModal && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-[100] flex items-center justify-center p-4">
                         <motion.div
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
-                            className="bg-white rounded-[2.5rem] p-10 max-w-2xl w-full shadow-2xl relative overflow-hidden"
+                            className="bg-white rounded-[2.5rem] p-8 max-w-2xl w-full max-h-[92vh] overflow-y-auto shadow-2xl relative"
                         >
                             <div className="absolute top-0 left-0 w-full h-2 bg-brand-600"></div>
-                            <div className="flex justify-between items-center mb-8">
+                            <div className="flex justify-between items-center mb-6">
                                 <h3 className="text-3xl font-display font-black">{currentSupplier.id ? 'Editar' : 'Nuevo'} Proveedor</h3>
                                 <button onClick={() => setShowModal(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
                                     <X size={24} />
@@ -239,7 +259,18 @@ const Suppliers = () => {
                                             placeholder="Ejem: Carlos Pérez"
                                         />
                                     </div>
-                                    <div className="md:col-span-1 space-y-2">
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 ml-1">N° de Cuenta</label>
+                                        <input
+                                            type="text"
+                                            className="input font-mono"
+                                            value={currentSupplier.nro_cuenta}
+                                            onChange={(e) => setCurrentSupplier({ ...currentSupplier, nro_cuenta: e.target.value })}
+                                            placeholder="Ejem: BCP 193-12345678-0-12"
+                                            maxLength={60}
+                                        />
+                                    </div>
+                                    <div className="md:col-span-2 space-y-2">
                                         <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 ml-1">Dirección</label>
                                         <div className="relative">
                                             <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
@@ -252,9 +283,19 @@ const Suppliers = () => {
                                             />
                                         </div>
                                     </div>
+                                    <div className="md:col-span-2 space-y-2">
+                                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 ml-1">Observaciones</label>
+                                        <textarea
+                                            className="input min-h-[70px]"
+                                            value={currentSupplier.observaciones}
+                                            onChange={(e) => setCurrentSupplier({ ...currentSupplier, observaciones: e.target.value })}
+                                            placeholder="Ejem: Entrega los martes y jueves, crédito a 15 días"
+                                            maxLength={500}
+                                        />
+                                    </div>
                                 </div>
 
-                                <div className="flex gap-4 pt-6">
+                                <div className="flex gap-4 pt-4">
                                     <button type="button" onClick={() => setShowModal(false)} className="flex-1 btn btn-secondary px-8 py-4 rounded-2xl font-black uppercase tracking-widest">Cancelar</button>
                                     <button type="submit" className="flex-1 btn btn-primary flex items-center justify-center gap-2 px-8 py-4 rounded-2xl font-black uppercase tracking-widest shadow-lg shadow-brand-500/30">
                                         <Save size={18} /> Guardar Proveedor
@@ -264,7 +305,9 @@ const Suppliers = () => {
                         </motion.div>
                     </div>
                 )}
-            </AnimatePresence>
+            </AnimatePresence>,
+            document.body
+            )}
         </div>
     );
 };

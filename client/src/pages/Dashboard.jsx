@@ -1,13 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { DollarSign, Users, ShoppingBag, TrendingUp, Calendar, Clock } from 'lucide-react';
+import { Users, ShoppingBag, TrendingUp, Calendar, Clock } from 'lucide-react';
+import SolesSymbol from '../components/SolesSymbol';
 import { motion } from 'framer-motion';
+import { APP_LOCALE, APP_TIMEZONE, formatTime, toPeruYmd } from '../utils/dateTime';
 
-const formatDateInput = (date) => {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-};
+const formatDateInput = (date) => toPeruYmd(date);
 
 const formatShortDate = (isoDate) => {
     return new Date(`${isoDate}T00:00:00`).toLocaleDateString('es-PE', {
@@ -69,7 +66,7 @@ const Dashboard = () => {
                 {
                     title: 'Ventas de Hoy',
                     value: `S/ ${Number(salesTodayData?.total || 0).toFixed(2)}`,
-                    icon: <DollarSign size={22} />,
+                    icon: <SolesSymbol size={22} />,
                     change: 'Facturado',
                     trend: 'neutral',
                     color: 'brand'
@@ -217,7 +214,7 @@ const Dashboard = () => {
                 </div>
                 <div className="flex items-center gap-3 px-5 py-3 glass rounded-2xl border border-[var(--border-color)] text-xs font-bold text-[var(--text-secondary)] shadow-sm">
                     <Calendar size={18} className="text-brand-600" />
-                    {new Date().toLocaleDateString('es-PE', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                    {new Date().toLocaleDateString(APP_LOCALE, { timeZone: APP_TIMEZONE, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                 </div>
             </div>
 
@@ -389,7 +386,7 @@ const Dashboard = () => {
                                             <div className="flex items-center gap-1.5 mt-1">
                                                 <Clock size={12} className="text-gray-500" />
                                                 <p className="text-[10px] font-bold uppercase text-gray-500 tracking-wider">
-                                                    {new Date(pedido.fecha_creacion).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    {formatTime(pedido.fecha_creacion)}
                                                 </p>
                                             </div>
                                         </div>

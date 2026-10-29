@@ -54,7 +54,7 @@ const BarPage = () => {
         pedidos.forEach(p => {
             if (p.detalles) {
                 p.detalles.forEach(d => {
-                    items.push({ ...d, mesa_numero: p.mesa_numero, pedido_id: p.id });
+                    items.push({ ...d, mesa_numero: p.mesa_numero, es_delivery: p.es_delivery, pedido_id: p.id });
                 });
             }
         });
@@ -73,7 +73,7 @@ const BarPage = () => {
             <div 
                 onDragOver={allowDrop} 
                 onDrop={(e) => onDrop(e, estado)}
-                className="flex-1 min-w-[350px] bg-blue-50/30 rounded-[2.5rem] p-6 border-2 border-dashed border-blue-100 flex flex-col h-full overflow-hidden"
+                className="flex-1 min-w-0 md:min-w-[300px] bg-blue-50/30 rounded-[2.5rem] p-6 border-2 border-dashed border-blue-100 flex flex-col h-full overflow-hidden"
             >
                 <div className="flex items-center justify-between mb-6 px-2 shrink-0">
                     <div className="flex items-center gap-3">
@@ -101,7 +101,7 @@ const BarPage = () => {
                                 </div>
                                 
                                 <div className="mb-3 flex gap-2">
-                                    <span className="text-[10px] font-black uppercase bg-blue-50 px-2 py-0.5 rounded text-blue-600">Mesa {item.mesa_numero}</span>
+                                    <span className="text-[10px] font-black uppercase bg-blue-50 px-2 py-0.5 rounded text-blue-600">{item.es_delivery ? 'Delivery' : `Mesa ${item.mesa_numero}`}</span>
                                 </div>
                                 
                                 <p className="font-bold text-gray-900 text-lg leading-tight pr-8">
@@ -146,7 +146,7 @@ const BarPage = () => {
                 </div>
             </div>
 
-            <div className="flex-1 flex gap-8 pb-4 items-stretch max-w-5xl">
+            <div className="flex-1 flex flex-col md:flex-row gap-6 md:gap-8 pb-4 items-stretch max-w-5xl">
                 {renderColumn("Recepcionado", "pendiente", "text-blue-500", <Bell size={18} />)}
                 {renderColumn("Despachado", "despachado", "text-emerald-500", <CheckCircle2 size={18} />)}
             </div>
