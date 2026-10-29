@@ -16,7 +16,7 @@ const COLUMNS = [
     { label: 'Descripción', width: 48, cell: (p) => cellText(p.descripcion) },
     { label: 'Precio (S/)', width: 14, cell: (p) => cellSoles(p.precio) },
     { label: 'Área', width: 12, cell: (p) => cellText(Number(p.es_barra) ? 'Barra' : 'Cocina') },
-    { label: 'Preparación', width: 14, cell: (p) => cellText(Number(p.es_receta) ? 'Receta' : 'Directo') },
+    { label: 'Control de stock', width: 14, cell: (p) => cellText(Number(p.es_receta) ? 'Sin stock' : 'Con stock') },
     { label: 'Disponible', width: 12, cell: (p) => cellText(siNo(p.disponible)) },
     { label: 'Stock', width: 10, cell: (p) => ({ type: Number, value: p.stock === undefined || p.stock === null ? null : Number(p.stock) }) }
 ];

@@ -343,9 +343,9 @@ const MenuManagement = () => {
                                     {producto.tipo_nombre || 'S/C'}
                                 </span>
                                 {producto.es_receta ? (
-                                    <span className="px-2.5 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-emerald-100">Receta</span>
+                                    <span className="px-2.5 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-emerald-100">Sin stock</span>
                                 ) : (
-                                    <span className="px-2.5 py-1 bg-blue-50 text-blue-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-blue-100">Directo</span>
+                                    <span className="px-2.5 py-1 bg-blue-50 text-blue-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-blue-100">Con stock</span>
                                 )}
                             </div>
                         </div>
