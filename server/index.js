@@ -745,7 +745,7 @@ app.post('/api/clientes', allowAdminWaiterCashier, async (req, res) => {
             'INSERT INTO clientes (nombre, telefono, email, documento, tipo_documento, direccion) VALUES (?, ?, ?, ?, ?, ?)',
             [nombre, telefono, email, documento, ['DNI', 'RUC', 'CE', 'PAS'].includes(tipoDocumento) ? tipoDocumento : null, direccion || null]
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -920,7 +920,7 @@ app.post('/api/cajas', allowAdmin, requireSede, async (req, res) => {
             'INSERT INTO cajas (sede_id, descripcion, saldo, estado) VALUES (?, ?, ?, ?)',
             [sedeOf(req), descripcion, saldo || 0, estado || 'cerrada']
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1389,7 +1389,7 @@ app.post('/api/mesas', allowAdmin, requireSede, async (req, res) => {
             'INSERT INTO mesas (sede_id, numero, capacidad, zona_id) VALUES (?, ?, ?, ?)',
             [sedeOf(req), numero, capacidad, zona_id]
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         if (err.code === 'ER_DUP_ENTRY') {
             return res.status(409).json({ error: 'Ya existe una mesa con ese numero en esta sede' });
@@ -1445,7 +1445,7 @@ app.post('/api/proveedores', allowAdminKitchenForWrites, async (req, res) => {
             'INSERT INTO proveedores (razon_social, ruc, contacto, telefono, direccion, nro_cuenta, observaciones) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [razon_social, ruc, contacto, telefono, direccion, nroCuenta, observaciones]
         );
-        res.json({ id: result.insertId, ...req.body, nro_cuenta: nroCuenta, observaciones });
+        res.json({ ...req.body, id: result.insertId, nro_cuenta: nroCuenta, observaciones });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1870,7 +1870,7 @@ app.post('/api/insumos', allowAdminKitchenForWrites, requireSede, async (req, re
         );
         await setSupplyStock(connection, sedeOf(req), result.insertId, stock_actual);
         await connection.commit();
-        res.json({ id: result.insertId, ...req.body, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
+        res.json({ ...req.body, id: result.insertId, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -2075,7 +2075,7 @@ app.post('/api/categorias', allowAdminKitchenForWrites, async (req, res) => {
             'INSERT INTO tipos_producto (nombre, descripcion, es_barra) VALUES (?, ?, ?)',
             [nombre, descripcion, es_barra || false]
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -2186,7 +2186,7 @@ app.post('/api/productos', allowAdminKitchenForWrites, requireSede, async (req, 
         );
         await setProductStock(connection, sedeOf(req), result.insertId, stock);
         await connection.commit();
-        res.json({ id: result.insertId, ...req.body, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
+        res.json({ ...req.body, id: result.insertId, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
