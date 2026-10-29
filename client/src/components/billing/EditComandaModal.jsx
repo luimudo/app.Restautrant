@@ -39,7 +39,7 @@ const EditComandaModal = ({ pedido, onClose, onSaved }) => {
         return () => { active = false; };
     }, [pedido.id]);
 
-    const total = useMemo(() => detalles.reduce((sum, item) => sum + Number(item.precio) * Number(item.cantidad), 0), [detalles]);
+    const total = useMemo(() => detalles.reduce((sum, item) => sum + Number(item.precio) * (Number(item.cantidad) || 0), 0), [detalles]);
 
     const agregarProducto = () => {
         const producto = productos.find((item) => String(item.id) === productoId);
@@ -61,7 +61,21 @@ const EditComandaModal = ({ pedido, onClose, onSaved }) => {
             : item));
     };
 
+    // La cantidad se puede escribir (eventos de muchas personas): se admite vacio mientras se teclea y se corrige al salir.
+    const escribirCantidad = (key, texto) => {
+        const limpio = texto.replace(/D/g, '').slice(0, 5);
+        setDetalles((items) => items.map((item) => (item.key === key ? { ...item, cantidad: limpio === '' ? '' : Number(limpio) } : item)));
+    };
+
+    const corregirCantidad = (key) => {
+        setDetalles((items) => items.map((item) => (item.key === key ? { ...item, cantidad: Math.max(1, Number(item.cantidad) || 1) } : item)));
+    };
+
     const guardar = async () => {
+        if (detalles.some((item) => !(Number(item.cantidad) >= 1))) {
+            setError('Indique una cantidad de al menos 1 en cada producto.');
+            return;
+        }
         if (detalles.length === 0) {
             setError('La comanda debe conservar al menos un producto.');
             return;
@@ -133,10 +147,19 @@ const EditComandaModal = ({ pedido, onClose, onSaved }) => {
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <button type="button" aria-label={`Reducir ${item.nombre}`} onClick={() => actualizarCantidad(item.key, -1)} className="rounded-lg border border-gray-200 bg-white p-2 text-gray-600 hover:border-brand-300"><Minus size={14} /></button>
-                                            <span className="w-7 text-center text-sm font-black">{item.cantidad}</span>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                aria-label={`Cantidad de ${item.nombre}`}
+                                                value={item.cantidad}
+                                                onChange={(event) => escribirCantidad(item.key, event.target.value)}
+                                                onFocus={(event) => event.target.select()}
+                                                onBlur={() => corregirCantidad(item.key)}
+                                                className="w-16 rounded-lg border border-gray-200 bg-white py-1.5 text-center text-sm font-black focus:border-brand-400 focus:outline-none"
+                                            />
                                             <button type="button" aria-label={`Aumentar ${item.nombre}`} onClick={() => actualizarCantidad(item.key, 1)} className="rounded-lg border border-gray-200 bg-white p-2 text-gray-600 hover:border-brand-300"><Plus size={14} /></button>
                                         </div>
-                                        <p className="w-24 text-right text-sm font-black">S/ {(Number(item.precio) * Number(item.cantidad)).toFixed(2)}</p>
+                                        <p className="w-24 text-right text-sm font-black">S/ {(Number(item.precio) * (Number(item.cantidad) || 0)).toFixed(2)}</p>
                                         <button type="button" aria-label={`Eliminar ${item.nombre}`} onClick={() => setDetalles((items) => items.filter((line) => line.key !== item.key))} className="rounded-lg p-2 text-red-500 hover:bg-red-50"><Trash2 size={16} /></button>
                                     </div>
                                 ))}
