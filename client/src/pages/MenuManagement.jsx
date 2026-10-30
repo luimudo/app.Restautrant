@@ -351,7 +351,7 @@ const MenuManagement = () => {
                         </div>
                         <div className="pt-6 border-t border-gray-50 flex justify-between items-center">
                             <p className="text-2xl font-display font-black text-brand-900 leading-none">S/ {Number(producto.precio).toFixed(2)}</p>
-                            {producto.stock !== undefined && (
+                            {producto.stock !== undefined && !Number(producto.es_receta) && (
                                 <div className="text-right">
                                     <p className="text-[9px] font-black uppercase text-gray-400 tracking-widest leading-none mb-1">Stock</p>
                                     <p className={`font-display font-black leading-none ${producto.stock < 5 ? 'text-red-500' : 'text-emerald-500'}`}>{producto.stock}</p>

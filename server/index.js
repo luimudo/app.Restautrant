@@ -1525,8 +1525,8 @@ const adjustProductStock = async (connection, sedeId, productoId, delta, almacen
 );
 
 /**
- * Finished products (bar categories or items that are not prepared from a recipe) leave the sales warehouse when
- * the order is sold. Stock may go negative: selling is never blocked by a missing count.
+ * Products that keep stock ("Sin stock" unchecked, es_receta = 0) leave the sales warehouse when the order is sold;
+ * the ones marked "Sin stock" (es_receta = 1) never move stock, bar category or not. Stock may go negative: selling is never blocked by a missing count.
  */
 // True once productos.factor_venta exists (se crea al iniciar); mientras no, cada unidad vendida descuenta 1 como antes.
 let tieneFactorVenta = false;
@@ -1537,7 +1537,7 @@ const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usu
          FROM detalles_pedido dp
          JOIN productos p ON p.id = dp.producto_id
          LEFT JOIN tipos_producto tp ON tp.id = p.tipo_id
-         WHERE dp.pedido_id = ? AND (tp.es_barra = 1 OR p.es_receta = 0)
+         WHERE dp.pedido_id = ? AND p.es_receta = 0
          GROUP BY dp.producto_id`,
         [pedidoId]
     );

@@ -56,10 +56,8 @@ const Inventory = () => {
             const insData = await insRes.json();
             const prodData = await prodRes.json();
             setInsumos(Array.isArray(insData) ? insData : []);
-            // Finished products: bar categories or items not prepared from a recipe. Their stock may be negative.
-            setProductosBar((Array.isArray(prodData) ? prodData : []).filter(p =>
-                p.es_barra === 1 || p.es_barra === true || !Number(p.es_receta)
-            ));
+            // Products that keep stock (not marked "Sin stock"). Their stock may be negative.
+            setProductosBar((Array.isArray(prodData) ? prodData : []).filter(p => !Number(p.es_receta)));
         } catch (error) {
             console.error('Error fetching inventory:', error);
         } finally {

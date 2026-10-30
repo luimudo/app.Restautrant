@@ -57,7 +57,7 @@ const Purchases = () => {
             if (porDefecto) setAlmacenId(String(porDefecto.id));
 
             setInsumos(insData);
-            setProductos(prodData.filter(p => p.es_barra === 1 || p.es_barra === true || !Number(p.es_receta)));
+            setProductos(prodData.filter(p => !Number(p.es_receta)));
             setProveedores(provData);
             if (provData.length > 0) setProveedorId(provData[0].id);
         } catch (error) {
