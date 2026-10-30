@@ -328,8 +328,8 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
                             {almacenes.map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
                         </select>
                     </Field>
-                    <Field label={tipo === 'ajuste' ? 'Referencia (N° guía / OC / motivo)' : 'Referencia (opcional)'}>
-                        <input className="input" value={referencia} onChange={(e) => setReferencia(e.target.value)} placeholder="Ej. Guía F001-1234" required={tipo === 'ajuste'} minLength={tipo === 'ajuste' ? 3 : undefined} maxLength={100} />
+                    <Field label="Referencia (opcional)">
+                        <input className="input" value={referencia} onChange={(e) => setReferencia(e.target.value)} placeholder="Ej. Guía F001-1234" maxLength={100} />
                     </Field>
                 </div>
 

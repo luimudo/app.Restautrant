@@ -6147,8 +6147,8 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         if (!['entrada', 'salida', 'ajuste'].includes(tipo)) throw new AlmacenError(400, 'Indique si es entrada, salida o ajuste');
-        // La referencia es opcional en entradas y salidas; en ajustes sigue siendo obligatoria.
-        if (referencia.length > 100 || (tipo === 'ajuste' && referencia.length < 3)) throw new AlmacenError(400, 'Ingrese la referencia (N° de guia, orden de compra o motivo)');
+        // La referencia es opcional en entradas, salidas y ajustes.
+        if (referencia.length > 100) throw new AlmacenError(400, 'La referencia admite hasta 100 caracteres');
         if (items.length === 0 || items.length > 100) throw new AlmacenError(400, 'Agregue entre 1 y 100 items al movimiento');
         const motivoTexto = tipo === 'ajuste' ? 'Ajuste de inventario' : MOTIVOS_MANUALES[tipo === 'entrada' ? 'ingreso' : 'egreso'][motivoClave];
         if (!motivoTexto) throw new AlmacenError(400, 'Seleccione el motivo del movimiento');
