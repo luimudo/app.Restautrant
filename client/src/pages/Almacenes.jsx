@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     Warehouse, Plus, Edit2, Eye, ArrowRightLeft, Truck, PackageCheck, XCircle, FileText, Send, RefreshCw, ClipboardSignature, Trash2, Search,
-    ClipboardList, ArrowDownToLine, ArrowUpFromLine
+    ClipboardList, ArrowDownToLine, ArrowUpFromLine, Download
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { SUPERADMIN } from '../security/accessControl';
 import { formatDateTime, startOfMonthYmd, toPeruYmd } from '../utils/dateTime';
 import { abrirPdf } from '../utils/printDocs';
+import { descargarMovimientos } from '../utils/exportInventario';
 import { Modal, Field, ErrorBox, ToggleGroup, SunatBadge } from '../components/billing/billingShared';
 import { readJson } from '../components/billing/billingUtils';
 import UbigeoSearchInput from '../components/UbigeoSearchInput';
@@ -68,6 +69,8 @@ const Almacenes = () => {
     const [guiaFiltros, setGuiaFiltros] = useState({ tipo: '', desde: startOfMonthYmd(toPeruYmd()), hasta: toPeruYmd() });
 
     const [movimientos, setMovimientos] = useState([]);
+    const [movPeriodo, setMovPeriodo] = useState(null); // periodo de lo que muestra la grilla (el Excel descarga lo mismo)
+    const [exportando, setExportando] = useState(false);
     const [movFiltros, setMovFiltros] = useState({ motivo: '', desde: startOfMonthYmd(toPeruYmd()), hasta: toPeruYmd() });
     const [movimientoForm, setMovimientoForm] = useState(null); // { tipo: 'ingreso' | 'egreso' }
 
@@ -96,6 +99,7 @@ const Almacenes = () => {
                 if (movFiltros.motivo) params.set('motivo', movFiltros.motivo);
                 if (isSuperadmin) params.set('sede_id', sedeFiltro);
                 setMovimientos(await readJson(await fetch(`/api/inventario/movimientos?${params}`), 'No se pudo cargar los movimientos.'));
+                setMovPeriodo({ desde: movFiltros.desde, hasta: movFiltros.hasta });
             } else if (isAdmin) {
                 const params = new URLSearchParams({ desde: guiaFiltros.desde, hasta: guiaFiltros.hasta });
                 if (guiaFiltros.tipo) params.set('tipo', guiaFiltros.tipo);
@@ -108,6 +112,21 @@ const Almacenes = () => {
             setLoading(false);
         }
     }, [isSuperadmin, isAdmin, sedeFiltro, estadoTr, guiaFiltros, movFiltros]);
+
+    const exportarMovimientos = async () => {
+        setExportando(true);
+        setError('');
+        try {
+            const sedeNombre = isSuperadmin && sedeFiltro === 'todas'
+                ? 'Todas las sedes'
+                : (sedes.find((x) => String(x.id) === String(isSuperadmin ? sedeFiltro : activeSedeId))?.nombre || 'Sede');
+            await descargarMovimientos({ periodo: movPeriodo || { desde: movFiltros.desde, hasta: movFiltros.hasta }, sedeNombre, movimientos });
+        } catch (e) {
+            setError('No se pudo generar el Excel de movimientos.');
+        } finally {
+            setExportando(false);
+        }
+    };
 
     useEffect(() => {
         load(tab);
@@ -300,7 +319,12 @@ const Almacenes = () => {
                                 {Object.entries(MOTIVO_MOVIMIENTO).map(([v, [label]]) => <option key={v} value={v}>{label}</option>)}
                             </select>
                         </Field>
-                        <button type="submit" className="btn btn-secondary"><Search size={16} /> Buscar</button>
+                        <div className="flex gap-2">
+                            <button type="submit" className="btn btn-secondary"><Search size={16} /> Buscar</button>
+                            <button type="button" className="btn btn-secondary" onClick={exportarMovimientos} disabled={exportando || loading || movimientos.length === 0}>
+                                <Download size={16} /> {exportando ? 'Generando...' : 'Excel'}
+                            </button>
+                        </div>
                     </form>
                     <div className="card p-0 overflow-hidden">
                         <div className="overflow-x-auto">
