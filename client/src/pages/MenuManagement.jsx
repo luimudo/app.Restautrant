@@ -470,6 +470,20 @@ const MenuManagement = () => {
                                 </div>
                                 {!currentProduct.es_receta && (
                                     <div className="space-y-2">
+                                        <label className="text-sm font-bold text-[var(--text-secondary)]">Costo unitario (S/ por {currentProduct.unidad_medida || 'unidad de stock'})</label>
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            step="0.0001"
+                                            className="input"
+                                            value={currentProduct.costo_unitario ?? ''}
+                                            onChange={(e) => setCurrentProduct({ ...currentProduct, costo_unitario: e.target.value })}
+                                        />
+                                        <p className="text-xs text-gray-500">Opcional. Al registrar entradas de inventario con costo, este valor se actualiza solo con el promedio ponderado.</p>
+                                    </div>
+                                )}
+                                {!currentProduct.es_receta && (
+                                    <div className="space-y-2">
                                         <label className="text-sm font-bold text-[var(--text-secondary)]">Stock que descuenta cada unidad vendida</label>
                                         <input
                                             type="number"

@@ -257,7 +257,7 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
 
     const opciones = useMemo(() => [
         ...insumos.map((i) => ({ tipo_item: 'insumo', id: i.id, nombre: i.nombre, unidad: i.unidad_medida || 'Unidad', unidad_id: i.unidad_id || null, costo: Number(i.costo_unitario) || 0 })),
-        ...productos.map((p) => ({ tipo_item: 'producto', id: p.id, nombre: p.nombre, unidad: p.unidad_medida || 'Unidad', unidad_id: null, costo: 0, decimales: Number(p.unidad_decimales) === 1 }))
+        ...productos.map((p) => ({ tipo_item: 'producto', id: p.id, nombre: p.nombre, unidad: p.unidad_medida || 'Unidad', unidad_id: null, costo: Number(p.costo_unitario) || 0, decimales: Number(p.unidad_decimales) === 1 }))
     ], [insumos, productos]);
     // Un producto se cuenta en enteros salvo que su unidad admita decimales (p. ej. cerveza por Litro).
     const soloEnteros = (opcion) => opcion?.tipo_item === 'producto' && !opcion.decimales;
@@ -296,7 +296,7 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
                         item_id: f.opcion.id,
                         ...(tipo === 'ajuste' ? { cantidad_fisica: Number(f.fisico) } : { cantidad: Number(f.cantidad) }),
                         ...(tipo !== 'ajuste' && f.opcion.tipo_item === 'insumo' && f.unidad_id ? { unidad_id: Number(f.unidad_id) } : {}),
-                        ...(tipo === 'entrada' && f.opcion.tipo_item === 'insumo' && f.costo !== '' ? { costo_unitario: Number(f.costo) } : {})
+                        ...(tipo === 'entrada' && f.costo !== '' ? { costo_unitario: Number(f.costo) } : {})
                     }))
                 })
             }), 'No se pudo registrar el movimiento.');
@@ -398,8 +398,8 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
                                         {tipo === 'entrada' && (
                                             <div className="col-span-6 md:col-span-3">
                                                 <span className="text-[10px] font-black uppercase text-gray-400">Costo unit. (S/) <span className="font-normal lowercase">(opcional)</span></span>
-                                                <input type="number" min="0" step="0.01" className="input font-mono" value={fila.costo} onChange={(e) => actualizar(fila.clave, { costo: e.target.value })} disabled={fila.opcion?.tipo_item === 'producto'}
-                                                    placeholder={fila.opcion?.tipo_item === 'producto' ? 'No aplica' : '0.00'} aria-label="Costo unitario" />
+                                                <input type="number" min="0" step="0.01" className="input font-mono" value={fila.costo} onChange={(e) => actualizar(fila.clave, { costo: e.target.value })}
+                                                    placeholder="0.00" aria-label="Costo unitario" />
                                             </div>
                                         )}
                                     </>

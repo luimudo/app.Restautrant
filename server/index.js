@@ -1530,6 +1530,8 @@ const adjustProductStock = async (connection, sedeId, productoId, delta, almacen
  */
 // True once productos.factor_venta exists (se crea al iniciar); mientras no, cada unidad vendida descuenta 1 como antes.
 let tieneFactorVenta = false;
+// True once productos.costo_unitario exists (se crea al iniciar).
+let tieneCostoProducto = false;
 
 const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usuarioId) => {
     const [items] = await connection.query(
@@ -2190,17 +2192,27 @@ const parseFactorVenta = (valor, actual = 1) => {
     return factor;
 };
 
+/** Unit cost of a product typed in the menu form; blank or missing means "leave it as it is" (null). */
+const parseCostoProducto = (valor) => {
+    if (valor === undefined || valor === null || valor === '') return null;
+    const costo = Math.round(Number(valor) * 10000) / 10000;
+    if (!(costo >= 0) || costo > 100000) throw httpError(400, 'El costo unitario no es valido');
+    return costo;
+};
+
 app.post('/api/productos', allowAdminKitchenForWrites, requireSede, async (req, res) => {
     const { nombre, descripcion, precio, tipo_id, es_receta, disponible, stock } = req.body;
     const connection = await pool.getConnection();
     try {
         const factorVenta = parseFactorVenta(req.body.factor_venta);
+        const costoProducto = parseCostoProducto(req.body.costo_unitario);
         await connection.beginTransaction();
         const unidad = await resolverUnidad(connection, req.body);
         const [result] = await connection.query(
             `INSERT INTO productos (nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad_id${tieneFactorVenta ? ', factor_venta' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?${tieneFactorVenta ? ', ?' : ''})`,
             [nombre, descripcion, precio, tipo_id, es_receta !== undefined ? es_receta : true, disponible !== undefined ? disponible : true, unidad.id, ...(tieneFactorVenta ? [factorVenta] : [])]
         );
+        if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, result.insertId]);
         await setProductStock(connection, sedeOf(req), result.insertId, stock);
         await connection.commit();
         res.json({ ...req.body, id: result.insertId, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
@@ -2220,6 +2232,8 @@ app.put('/api/productos/:id', allowAdminKitchenForWrites, requireSede, async (re
         // Clients that do not send a unit keep the one the product already has.
         const unidad = req.body.unidad_id || req.body.unidad_medida ? await resolverUnidad(connection, req.body) : null;
         const factorVenta = parseFactorVenta(req.body.factor_venta, null);
+        const costoProducto = parseCostoProducto(req.body.costo_unitario);
+        if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, req.params.id]);
         await connection.query(
             `UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id)${tieneFactorVenta ? ', factor_venta = COALESCE(?, factor_venta)' : ''} WHERE id = ?`,
             [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, ...(tieneFactorVenta ? [factorVenta] : []), req.params.id]
@@ -6172,7 +6186,7 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
             const [catalogo] = await connection.query(
                 tipoItem === 'insumo'
                     ? 'SELECT i.nombre, i.costo_unitario, i.unidad_id, um.permite_decimales FROM insumos i LEFT JOIN unidades_medida um ON um.id = i.unidad_id WHERE i.id = ?'
-                    : 'SELECT p.nombre, p.unidad_id, um.permite_decimales FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?',
+                    : `SELECT p.nombre, p.unidad_id, um.permite_decimales${tieneCostoProducto ? ', p.costo_unitario' : ''} FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?`,
                 [itemId]
             );
             if (!catalogo[0]) throw new AlmacenError(404, 'Un item del movimiento ya no existe en el catalogo');
@@ -6206,13 +6220,19 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
                     if (costoIngresado !== null && !(costoIngresado >= 0)) throw new AlmacenError(400, `El costo de ${nombre} no es valido`);
                     // The cost is typed per unit of the line; the supply keeps it per stock unit.
                     const costo = costoIngresado === null ? null : Math.round((costoIngresado / linea.factor) * 10000) / 10000;
-                    if (tipoItem === 'insumo' && costo > 0) {
+                    if ((tipoItem === 'insumo' || tieneCostoProducto) && costo > 0) {
                         costoUnitario = costo;
-                        // Weighted average over the stock of the supply in every warehouse, before this entry.
-                        const [total] = await connection.query('SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?', [itemId]);
+                        // Weighted average over the stock of the item in every warehouse, before this entry.
+                        const [total] = await connection.query(tipoItem === 'insumo'
+                            ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
+                            : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
                         const previo = Math.max(0, Number(total[0].stock));
                         const promedio = previo > 0 ? ((previo * Number(catalogo[0].costo_unitario || 0)) + (cantidad * costo)) / (previo + cantidad) : costo;
-                        await connection.query('UPDATE insumos SET costo_unitario = ? WHERE id = ?', [round2(promedio), itemId]);
+                        // Supplies keep the cost with 2 decimals; products with 4 (a litre of beer costs a few cents per ml).
+                        await connection.query(
+                            `UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`,
+                            [tipoItem === 'insumo' ? round2(promedio) : Math.round(promedio * 10000) / 10000, itemId]
+                        );
                     }
                 }
             }
@@ -7741,6 +7761,16 @@ const asegurarStockDecimal = async () => {
         console.log('productos.factor_venta agregado');
     }
     tieneFactorVenta = true;
+
+    // Costo unitario de los productos (bebidas): se actualiza con el promedio ponderado de cada entrada con costo.
+    const [costo] = await pool.query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'productos' AND COLUMN_NAME = 'costo_unitario'"
+    );
+    if (costo.length === 0) {
+        await pool.query('ALTER TABLE productos ADD COLUMN costo_unitario DECIMAL(12,4) NOT NULL DEFAULT 0');
+        console.log('productos.costo_unitario agregado');
+    }
+    tieneCostoProducto = true;
 };
 
 app.listen(PORT, () => {

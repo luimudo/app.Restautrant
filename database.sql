@@ -206,6 +206,7 @@ CREATE TABLE productos (
     disponible TINYINT(1) DEFAULT 1,
     unidad_id INT NULL,
     factor_venta DECIMAL(12,4) NOT NULL DEFAULT 1,  -- unidades de stock que descuenta cada unidad vendida
+    costo_unitario DECIMAL(12,4) NOT NULL DEFAULT 0,  -- costo por unidad de stock (promedio ponderado de las entradas)
     FOREIGN KEY (tipo_id) REFERENCES tipos_producto(id),
     CONSTRAINT fk_productos_unidad FOREIGN KEY (unidad_id) REFERENCES unidades_medida(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

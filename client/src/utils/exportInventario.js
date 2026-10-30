@@ -22,7 +22,7 @@ const sheet = (name, columns, rows) => ({
     stickyRowsCount: 1
 });
 
-// Insumos: costo real. Bebidas de barra: la UI aproxima el costo como 40% del precio de venta.
+// Insumos y bebidas: costo registrado. Una bebida sin costo registrado se aproxima como 40% del precio de venta.
 const insumoRow = (i) => {
     const stock = Number(i.stock_actual || 0);
     const costo = Number(i.costo_unitario || 0);
@@ -31,8 +31,9 @@ const insumoRow = (i) => {
 const barraRow = (p) => {
     const stock = Number(p.stock || 0);
     const precio = Number(p.precio || 0);
-    const costo = round2(precio * 0.4);
-    return { nombre: p.nombre, categoria: p.tipo_nombre, unidad: p.unidad_medida || 'Unidad', stock, precio, costo, valor: round2(stock * costo) };
+    const registrado = Number(p.costo_unitario || 0);
+    const costo = registrado > 0 ? registrado : round2(precio * 0.4);
+    return { nombre: p.nombre, categoria: p.tipo_nombre, unidad: p.unidad_medida || 'Unidad', stock, precio, costo, origen: registrado > 0 ? 'Registrado' : 'Estimado (40%)', valor: round2(stock * costo) };
 };
 
 const INSUMO_COLUMNS = [
@@ -50,8 +51,9 @@ const BARRA_COLUMNS = [
     { label: 'Unidad', width: 14, cell: (r) => cellText(r.unidad) },
     { label: 'Stock actual', width: 14, cell: (r) => cellNum(r.stock) },
     { label: 'Precio de venta', width: 16, cell: (r) => cellNum(r.precio) },
-    { label: 'Costo aprox. (40%)', width: 18, cell: (r) => cellNum(r.costo) },
-    { label: 'Valor en stock (aprox.)', width: 22, cell: (r) => cellNum(r.valor) }
+    { label: 'Costo unitario', width: 16, cell: (r) => cellNum(r.costo) },
+    { label: 'Origen del costo', width: 16, cell: (r) => cellText(r.origen) },
+    { label: 'Valor en stock', width: 16, cell: (r) => cellNum(r.valor) }
 ];
 
 const resumenSheet = (insumos, barra) => {
