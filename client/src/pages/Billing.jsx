@@ -484,7 +484,7 @@ const Billing = () => {
                                         </td>
                                         <td className="px-6 py-5 text-center">
                                             <span className="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-xl text-xs font-black uppercase tracking-widest border border-gray-200">
-                                                {pedido.es_delivery ? 'Delivery' : `Mesa ${pedido.mesa_id}`}
+                                                {pedido.es_delivery ? 'Delivery' : `Mesa ${pedido.mesa_numero ?? pedido.mesa_id}`}
                                             </span>
                                         </td>
                                         <td className="px-6 py-5 text-center">
