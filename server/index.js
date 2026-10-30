@@ -1612,11 +1612,13 @@ const factorConversion = async (connection, desdeId, haciaId) => {
  * Quantity line typed in `unidadId` for an item stocked in its own unit (catalogo.unidad_id):
  * factor to the stock unit, and whether the quantity must be a whole number.
  */
+const esEntero = (tipoItem, catalogo) => !Number(catalogo.permite_decimales ?? (tipoItem === 'producto' ? 0 : 1));
+
 const unidadDeLinea = async (connection, tipoItem, catalogo, unidadId, nombre) => {
     const base = catalogo.unidad_id ? Number(catalogo.unidad_id) : null;
     const elegida = unidadId ? Number(unidadId) : null;
     if (!elegida || !base || elegida === base) {
-        return { factor: 1, entero: tipoItem === 'producto' || !Number(catalogo.permite_decimales ?? 1) };
+        return { factor: 1, entero: esEntero(tipoItem, catalogo) };
     }
     if (tipoItem !== 'insumo') throw httpError(400, `${nombre} no admite conversion de unidades`);
     const unidad = await unidadValida(connection, elegida);
@@ -2106,7 +2108,7 @@ app.delete('/api/categorias/:id', allowAdminKitchenForWrites, async (req, res) =
 // --- Productos (carta compartida, stock por sede) ---
 const PRODUCT_SELECT_SQL = `
     SELECT p.*, (SELECT COALESCE(SUM(sp.stock), 0) FROM stock_productos sp WHERE sp.producto_id = p.id AND sp.sede_id = ?) AS stock,
-           t.nombre as tipo_nombre, t.es_barra, COALESCE(um.abreviatura, 'Unidad') AS unidad_medida,
+           t.nombre as tipo_nombre, t.es_barra, COALESCE(um.abreviatura, 'Unidad') AS unidad_medida, COALESCE(um.permite_decimales, 0) AS unidad_decimales,
            CASE WHEN EXISTS (SELECT 1 FROM producto_imagenes pi WHERE pi.producto_id = p.id)
                 THEN CONCAT('/api/productos/', p.id, '/imagen') ELSE NULL END AS imagen_url
     FROM productos p
@@ -6061,7 +6063,6 @@ app.post('/api/inventario/movimientos', allowAdmin, async (req, res) => {
         if (!MOTIVOS_MANUALES[tipo]) throw new AlmacenError(400, 'Indique si es ingreso o egreso');
         if (!['insumo', 'producto'].includes(tipoItem) || !Number(itemId)) throw new AlmacenError(400, 'Item invalido');
         if (!(cantidad > 0)) throw new AlmacenError(400, 'La cantidad debe ser mayor a 0');
-        if (tipoItem === 'producto' && !Number.isInteger(cantidad)) throw new AlmacenError(400, 'Los productos se mueven en unidades enteras');
         if (!MOTIVOS_MANUALES[tipo][motivo]) throw new AlmacenError(400, 'Seleccione el motivo del movimiento');
 
         await connection.beginTransaction();
@@ -6069,8 +6070,11 @@ app.post('/api/inventario/movimientos', allowAdmin, async (req, res) => {
         if (!almacen || !sedeVisible(req, almacen.sede_id)) throw new AlmacenError(404, 'Almacen no encontrado');
         if (!Number(almacen.activo)) throw new AlmacenError(409, 'El almacen esta inactivo');
 
-        const [items] = await connection.query(`SELECT nombre FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} WHERE id = ?`, [itemId]);
+        const [items] = await connection.query(
+            `SELECT t.nombre, um.permite_decimales FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} t LEFT JOIN unidades_medida um ON um.id = t.unidad_id WHERE t.id = ?`, [itemId]
+        );
         if (!items[0]) throw new AlmacenError(404, 'Item no encontrado');
+        if (esEntero(tipoItem, items[0]) && !Number.isInteger(cantidad)) throw new AlmacenError(400, `${items[0].nombre} se mueve en unidades enteras`);
 
         const delta = tipo === 'ingreso' ? cantidad : -cantidad;
         if (tipo === 'egreso') {
@@ -6134,7 +6138,7 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
             const [catalogo] = await connection.query(
                 tipoItem === 'insumo'
                     ? 'SELECT i.nombre, i.costo_unitario, i.unidad_id, um.permite_decimales FROM insumos i LEFT JOIN unidades_medida um ON um.id = i.unidad_id WHERE i.id = ?'
-                    : 'SELECT nombre, unidad_id FROM productos WHERE id = ?',
+                    : 'SELECT p.nombre, p.unidad_id, um.permite_decimales FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?',
                 [itemId]
             );
             if (!catalogo[0]) throw new AlmacenError(404, 'Un item del movimiento ya no existe en el catalogo');
@@ -6143,7 +6147,7 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
             const [filas] = await connection.query(`SELECT ${amount} AS stock FROM ${table} WHERE almacen_id = ? AND ${column} = ? FOR UPDATE`, [almacen.id, itemId]);
             const actual = Number(filas[0]?.stock || 0);
             // Adjustments count the stock unit; entries and exits may be typed in another unit that converts to it.
-            const entero = tipoItem === 'producto' || !Number(catalogo[0].permite_decimales ?? 1);
+            const entero = esEntero(tipoItem, catalogo[0]);
 
             let delta;
             let costoUnitario = null;
@@ -7676,9 +7680,21 @@ const sincronizarSunatPendientes = async () => {
     }
 };
 
+// El stock de productos admite decimales (cerveza por litros): la columna era INT en bases antiguas. Idempotente.
+const asegurarStockDecimal = async () => {
+    const [rows] = await pool.query(
+        "SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_productos' AND COLUMN_NAME = 'stock'"
+    );
+    if (rows[0] && String(rows[0].DATA_TYPE).toLowerCase() !== 'decimal') {
+        await pool.query('ALTER TABLE stock_productos MODIFY stock DECIMAL(12,3) NOT NULL DEFAULT 0');
+        console.log('stock_productos.stock convertido a DECIMAL(12,3)');
+    }
+};
+
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     permisos.iniciar();
+    asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();
     setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref();

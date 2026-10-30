@@ -239,7 +239,7 @@ CREATE TABLE stock_productos (
     almacen_id INT NOT NULL,
     sede_id INT NOT NULL,
     producto_id INT NOT NULL,
-    stock INT NOT NULL DEFAULT 0,
+    stock DECIMAL(12,3) NOT NULL DEFAULT 0,
     PRIMARY KEY (almacen_id, producto_id),
     CONSTRAINT fk_stock_productos_almacen FOREIGN KEY (almacen_id) REFERENCES almacenes(id),
     INDEX idx_stock_productos_sede (sede_id, producto_id),

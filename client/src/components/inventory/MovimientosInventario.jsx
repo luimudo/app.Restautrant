@@ -257,8 +257,10 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
 
     const opciones = useMemo(() => [
         ...insumos.map((i) => ({ tipo_item: 'insumo', id: i.id, nombre: i.nombre, unidad: i.unidad_medida || 'Unidad', unidad_id: i.unidad_id || null, costo: Number(i.costo_unitario) || 0 })),
-        ...productos.map((p) => ({ tipo_item: 'producto', id: p.id, nombre: p.nombre, unidad: p.unidad_medida || 'Unidad', unidad_id: null, costo: 0 }))
+        ...productos.map((p) => ({ tipo_item: 'producto', id: p.id, nombre: p.nombre, unidad: p.unidad_medida || 'Unidad', unidad_id: null, costo: 0, decimales: Number(p.unidad_decimales) === 1 }))
     ], [insumos, productos]);
+    // Un producto se cuenta en enteros salvo que su unidad admita decimales (p. ej. cerveza por Litro).
+    const soloEnteros = (opcion) => opcion?.tipo_item === 'producto' && !opcion.decimales;
     const { activas: unidadesActivas, conversiones } = useUnidades(true);
     // Units a supply line can be typed in (its own plus the ones that convert to it); other items only have their own.
     const unidadesDeFila = (opcion) => (opcion?.tipo_item === 'insumo' ? unidadesConvertibles(unidadesActivas, conversiones, opcion.unidad_id) : []);
@@ -366,7 +368,7 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
                                         </div>
                                         <div className="col-span-4 md:col-span-2">
                                             <span className="text-[10px] font-black uppercase text-gray-400">Físico real</span>
-                                            <input type="number" min="0" step={fila.opcion?.tipo_item === 'producto' ? 1 : 0.001} className="input font-mono" value={fila.fisico} onChange={(e) => actualizar(fila.clave, { fisico: e.target.value })} required aria-label="Conteo físico" />
+                                            <input type="number" min="0" step={soloEnteros(fila.opcion) ? 1 : 0.001} className="input font-mono" value={fila.fisico} onChange={(e) => actualizar(fila.clave, { fisico: e.target.value })} required aria-label="Conteo físico" />
                                         </div>
                                         <div className="col-span-3 md:col-span-2">
                                             <span className="text-[10px] font-black uppercase text-gray-400">Diferencia</span>
@@ -379,7 +381,7 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
                                     <>
                                         <div className={`col-span-5 ${tipo === 'entrada' ? 'md:col-span-2' : 'md:col-span-3'}`}>
                                             <span className="text-[10px] font-black uppercase text-gray-400">Cantidad{tipo === 'salida' && fila.opcion ? ` (disp. ${cantidadTexto(sistema)} ${fila.opcion.unidad})` : ''}</span>
-                                            <input type="number" min={fila.opcion?.tipo_item === 'producto' ? 1 : 0.001} step={fila.opcion?.tipo_item === 'producto' ? 1 : 0.001}
+                                            <input type="number" min={soloEnteros(fila.opcion) ? 1 : 0.001} step={soloEnteros(fila.opcion) ? 1 : 0.001}
                                                 max={tipo === 'salida' && fila.opcion && String(fila.unidad_id || '') === String(fila.opcion.unidad_id || '') ? sistema : undefined}
                                                 className="input font-mono" value={fila.cantidad} onChange={(e) => actualizar(fila.clave, { cantidad: e.target.value })} required aria-label="Cantidad" />
                                         </div>
