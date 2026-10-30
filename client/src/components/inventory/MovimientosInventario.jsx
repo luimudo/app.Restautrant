@@ -379,7 +379,7 @@ const RegistrarMovimientoModal = ({ tipoInicial, almacenes, insumos, productos, 
                                     <>
                                         <div className={`col-span-5 ${tipo === 'entrada' ? 'md:col-span-2' : 'md:col-span-3'}`}>
                                             <span className="text-[10px] font-black uppercase text-gray-400">Cantidad{tipo === 'salida' && fila.opcion ? ` (disp. ${cantidadTexto(sistema)} ${fila.opcion.unidad})` : ''}</span>
-                                            <input type="number" min="0.001" step={fila.opcion?.tipo_item === 'producto' ? 1 : 0.001}
+                                            <input type="number" min={fila.opcion?.tipo_item === 'producto' ? 1 : 0.001} step={fila.opcion?.tipo_item === 'producto' ? 1 : 0.001}
                                                 max={tipo === 'salida' && fila.opcion && String(fila.unidad_id || '') === String(fila.opcion.unidad_id || '') ? sistema : undefined}
                                                 className="input font-mono" value={fila.cantidad} onChange={(e) => actualizar(fila.clave, { cantidad: e.target.value })} required aria-label="Cantidad" />
                                         </div>
