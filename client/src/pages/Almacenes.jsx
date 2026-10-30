@@ -542,6 +542,11 @@ const MovimientoModal = ({ sedeId, inicial, onClose, onSaved }) => {
         ? stock.filter((i) => i.tipo_item === form.tipo_item).map((i) => ({ id: i.item_id, label: `${i.descripcion} (disp. ${cantidad(i.stock)} ${i.unidad})` }))
         : (catalogo[form.tipo_item] || []).map((i) => ({ id: i.id, label: i.nombre }));
     const seleccionado = esEgreso ? stock.find((i) => i.tipo_item === form.tipo_item && String(i.item_id) === String(form.item_id)) : null;
+    // A product is counted in whole numbers unless its unit allows decimals (e.g. beer by Litro).
+    const productoConDecimales = form.tipo_item === 'producto' && (esEgreso
+        ? Number(seleccionado?.decimales) === 1
+        : Number((catalogo.producto || []).find((p) => String(p.id) === String(form.item_id))?.unidad_decimales) === 1);
+    const soloEnteros = form.tipo_item === 'producto' && !productoConDecimales;
 
     const save = async (event) => {
         event.preventDefault();
@@ -584,7 +589,7 @@ const MovimientoModal = ({ sedeId, inicial, onClose, onSaved }) => {
                 {esEgreso && form.almacen_id && opciones.length === 0 && <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">El almacén no tiene stock de este tipo.</p>}
                 <div className="grid grid-cols-2 gap-3">
                     <Field label="Cantidad">
-                        <input type="number" className="input text-right" min={form.tipo_item === 'producto' ? 1 : 0.001} step={form.tipo_item === 'producto' ? 1 : 0.001}
+                        <input type="number" className="input text-right" min={soloEnteros ? 1 : 0.001} step={soloEnteros ? 1 : 0.001}
                             max={seleccionado ? seleccionado.stock : undefined} value={form.cantidad} onChange={(e) => set({ cantidad: e.target.value })} required />
                     </Field>
                     <Field label="Motivo">
@@ -690,7 +695,7 @@ const TransferenciaModal = ({ sedeId, onClose, onSaved }) => {
                                         <input type="checkbox" checked={Number(cantidades[key(i)]) === 1} onChange={(e) => setCantidades({ ...cantidades, [key(i)]: e.target.checked ? 1 : 0 })} /> Trasladar
                                     </label>
                                 ) : (
-                                    <input type="number" min={0} max={i.stock} step={i.tipo_item === 'producto' ? 1 : 0.001} className="input text-right" aria-label={`Cantidad de ${i.descripcion}`}
+                                    <input type="number" min={0} max={i.stock} step={i.tipo_item === 'producto' && !i.decimales ? 1 : 0.001} className="input text-right" aria-label={`Cantidad de ${i.descripcion}`}
                                         value={cantidades[key(i)] ?? ''} onChange={(e) => setCantidades({ ...cantidades, [key(i)]: e.target.value })} />
                                 )}
                             </div>
@@ -763,7 +768,7 @@ const TransferenciaDetalle = ({ transferencia: t, isAdmin, isSuperadmin, onClose
                             <td className="py-2 text-right tabular-nums">{cantidad(l.cantidad)} <span className="text-xs text-gray-500">{l.unidad}</span></td>
                             <td className="py-2 text-right w-28">
                                 {t.estado === 'en_transito' && esDestino ? (
-                                    <input type="number" min={0} max={l.cantidad} step={l.tipo_item === 'insumo' ? 0.001 : 1} className="input text-right" aria-label={`Recibido de ${l.descripcion}`}
+                                    <input type="number" min={0} max={l.cantidad} step={l.tipo_item === 'insumo' || l.decimales ? 0.001 : 1} className="input text-right" aria-label={`Recibido de ${l.descripcion}`}
                                         value={recibido[l.id] ?? l.cantidad} onChange={(e) => setRecibido({ ...recibido, [l.id]: e.target.value })} />
                                 ) : l.cantidad_recibida === null ? '—' : <span className={`font-black ${l.cantidad_recibida < l.cantidad ? 'text-rose-600' : ''}`}>{cantidad(l.cantidad_recibida)}</span>}
                             </td>

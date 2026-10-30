@@ -1528,9 +1528,12 @@ const adjustProductStock = async (connection, sedeId, productoId, delta, almacen
  * Finished products (bar categories or items that are not prepared from a recipe) leave the sales warehouse when
  * the order is sold. Stock may go negative: selling is never blocked by a missing count.
  */
+// True once productos.factor_venta exists (se crea al iniciar); mientras no, cada unidad vendida descuenta 1 como antes.
+let tieneFactorVenta = false;
+
 const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usuarioId) => {
     const [items] = await connection.query(
-        `SELECT dp.producto_id, SUM(dp.cantidad) AS cantidad
+        `SELECT dp.producto_id, ROUND(SUM(dp.cantidad) * ${tieneFactorVenta ? 'MAX(p.factor_venta)' : '1'}, 3) AS cantidad
          FROM detalles_pedido dp
          JOIN productos p ON p.id = dp.producto_id
          LEFT JOIN tipos_producto tp ON tp.id = p.tipo_id
@@ -2176,15 +2179,27 @@ app.get('/api/productos/:id', allowAnyProfile, requireSede, async (req, res) => 
     }
 });
 
+/**
+ * Units of stock that each unit sold takes out (a 620 ml bottle of beer stocked in litres: 0.62). Blank or missing means 1.
+ * `actual` is the value to keep when the client sends nothing.
+ */
+const parseFactorVenta = (valor, actual = 1) => {
+    if (valor === undefined || valor === null || valor === '') return actual;
+    const factor = Math.round(Number(valor) * 10000) / 10000;
+    if (!(factor > 0) || factor > 100000) throw httpError(400, 'El descuento de stock por unidad vendida debe ser mayor a 0');
+    return factor;
+};
+
 app.post('/api/productos', allowAdminKitchenForWrites, requireSede, async (req, res) => {
     const { nombre, descripcion, precio, tipo_id, es_receta, disponible, stock } = req.body;
     const connection = await pool.getConnection();
     try {
+        const factorVenta = parseFactorVenta(req.body.factor_venta);
         await connection.beginTransaction();
         const unidad = await resolverUnidad(connection, req.body);
         const [result] = await connection.query(
-            'INSERT INTO productos (nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [nombre, descripcion, precio, tipo_id, es_receta !== undefined ? es_receta : true, disponible !== undefined ? disponible : true, unidad.id]
+            `INSERT INTO productos (nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad_id${tieneFactorVenta ? ', factor_venta' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?${tieneFactorVenta ? ', ?' : ''})`,
+            [nombre, descripcion, precio, tipo_id, es_receta !== undefined ? es_receta : true, disponible !== undefined ? disponible : true, unidad.id, ...(tieneFactorVenta ? [factorVenta] : [])]
         );
         await setProductStock(connection, sedeOf(req), result.insertId, stock);
         await connection.commit();
@@ -2204,9 +2219,10 @@ app.put('/api/productos/:id', allowAdminKitchenForWrites, requireSede, async (re
         await connection.beginTransaction();
         // Clients that do not send a unit keep the one the product already has.
         const unidad = req.body.unidad_id || req.body.unidad_medida ? await resolverUnidad(connection, req.body) : null;
+        const factorVenta = parseFactorVenta(req.body.factor_venta, null);
         await connection.query(
-            'UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id) WHERE id = ?',
-            [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, req.params.id]
+            `UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id)${tieneFactorVenta ? ', factor_venta = COALESCE(?, factor_venta)' : ''} WHERE id = ?`,
+            [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, ...(tieneFactorVenta ? [factorVenta] : []), req.params.id]
         );
         await setProductStock(connection, sedeOf(req), req.params.id, stock);
         await connection.commit();
@@ -3940,14 +3956,24 @@ const restituirStockVenta = async (connection, factura, usuarioId, { cantidades 
          WHERE motivo = 'venta' AND tipo_item = 'producto' AND sede_id = ? AND detalle = ? AND cantidad < 0`,
         [factura.sede_id, `Comprobante ${factura.numero_comprobante}`]
     );
-    // `cantidades` (producto_id -> unidades) limits the return to what a credit note by item gives back; without it everything returns.
-    const pendientes = cantidades ? { ...cantidades } : null;
+    // `cantidades` (producto_id -> unidades vendidas) limits the return to what a credit note by item gives back; without it everything
+    // returns. The movements are in stock units, so the units sold are converted with the product's factor_venta.
+    let pendientes = null;
+    if (cantidades) {
+        pendientes = {};
+        const ids = Object.keys(cantidades).map(Number).filter((id) => id > 0);
+        const [factores] = ids.length
+            ? await connection.query(`SELECT id, ${tieneFactorVenta ? 'factor_venta' : '1 AS factor_venta'} FROM productos WHERE id IN (?)`, [ids])
+            : [[]];
+        const factorDe = new Map(factores.map((f) => [Number(f.id), Number(f.factor_venta) || 1]));
+        for (const id of ids) pendientes[id] = Math.round(Number(cantidades[id]) * (factorDe.get(id) || 1) * 1000) / 1000;
+    }
     for (const salida of salidas) {
         let cantidad = Number(salida.cantidad);
         if (pendientes) {
             cantidad = Math.min(cantidad, Number(pendientes[salida.item_id]) || 0);
             if (cantidad <= 0) continue;
-            pendientes[salida.item_id] -= cantidad;
+            pendientes[salida.item_id] = Math.round((pendientes[salida.item_id] - cantidad) * 1000) / 1000;
         }
         await adjustStockAlmacen(connection, 'producto', salida.almacen_id, factura.sede_id, salida.item_id, cantidad);
         await registrarMovimiento(connection, {
@@ -5815,7 +5841,7 @@ const stockDeAlmacen = async (connection, almacenId, soloDisponibles = false) =>
         [almacenId]
     );
     const [productos] = await connection.query(
-        `SELECT p.id AS item_id, 'producto' AS tipo_item, p.nombre AS descripcion, COALESCE(um.abreviatura, 'Unidad') AS unidad, sp.stock AS stock
+        `SELECT p.id AS item_id, 'producto' AS tipo_item, p.nombre AS descripcion, COALESCE(um.abreviatura, 'Unidad') AS unidad, COALESCE(um.permite_decimales, 0) AS decimales, sp.stock AS stock
          FROM stock_productos sp JOIN productos p ON p.id = sp.producto_id
          LEFT JOIN unidades_medida um ON um.id = p.unidad_id
          WHERE sp.almacen_id = ? ${soloDisponibles ? 'AND sp.stock > 0' : 'AND sp.stock <> 0'} ORDER BY p.nombre`,
@@ -5881,8 +5907,16 @@ const findTransferencia = async (connection, req, id, lock = false) => {
 };
 
 const detalleTransferencia = async (connection, id) => {
-    const [rows] = await connection.query('SELECT * FROM transferencia_detalle WHERE transferencia_id = ? ORDER BY id', [id]);
-    return rows.map((row) => ({ ...row, cantidad: Number(row.cantidad), cantidad_recibida: row.cantidad_recibida === null ? null : Number(row.cantidad_recibida) }));
+    // `decimales`: whether the quantity of the line may have decimals (products follow their unit; supplies always do).
+    const [rows] = await connection.query(
+        `SELECT td.*, CASE WHEN td.tipo_item = 'producto' THEN COALESCE(um.permite_decimales, 0) WHEN td.tipo_item = 'equipo' THEN 0 ELSE 1 END AS decimales
+         FROM transferencia_detalle td
+         LEFT JOIN productos p ON td.tipo_item = 'producto' AND p.id = td.item_id
+         LEFT JOIN unidades_medida um ON um.id = p.unidad_id
+         WHERE td.transferencia_id = ? ORDER BY td.id`,
+        [id]
+    );
+    return rows.map((row) => ({ ...row, decimales: Number(row.decimales) === 1, cantidad: Number(row.cantidad), cantidad_recibida: row.cantidad_recibida === null ? null : Number(row.cantidad_recibida) }));
 };
 
 /** Validates the lines against the catalog (descriptions and units are taken from it, never from the client). */
@@ -5910,11 +5944,11 @@ const prepararLineas = async (connection, almacenOrigenId, items) => {
             if (!rows[0]) throw new AlmacenError(400, 'Insumo no encontrado');
             lineas.push({ tipo_item: tipo, item_id: itemId, descripcion: rows[0].nombre, unidad: rows[0].unidad_medida || 'Unidad', cantidad });
         } else {
-            if (!Number.isInteger(cantidad)) throw new AlmacenError(400, 'Los productos se transfieren en unidades enteras');
             const [rows] = await connection.query(
-                "SELECT p.nombre, COALESCE(um.abreviatura, 'Unidad') AS unidad FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?", [itemId]
+                "SELECT p.nombre, COALESCE(um.abreviatura, 'Unidad') AS unidad, um.permite_decimales FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?", [itemId]
             );
             if (!rows[0]) throw new AlmacenError(400, 'Producto no encontrado');
+            if (esEntero('producto', rows[0]) && !Number.isInteger(cantidad)) throw new AlmacenError(400, `${rows[0].nombre} se transfiere en unidades enteras`);
             lineas.push({ tipo_item: tipo, item_id: itemId, descripcion: rows[0].nombre, unidad: rows[0].unidad, cantidad });
         }
     }
@@ -6381,7 +6415,12 @@ app.post('/api/transferencias/:id/recibir', allowAdminOrKitchenRecibir, async (r
             const motivo = textoOpcional(input?.motivo_diferencia, 200);
             if (!(recibida >= 0) || recibida > linea.cantidad) throw new AlmacenError(400, `Cantidad recibida invalida para ${linea.descripcion} (enviado ${linea.cantidad})`);
             if (linea.tipo_item === 'equipo' && ![0, 1].includes(recibida)) throw new AlmacenError(400, 'Un equipo se recibe completo (1) o no se recibe (0)');
-            if (linea.tipo_item === 'producto' && !Number.isInteger(recibida)) throw new AlmacenError(400, 'Los productos se reciben en unidades enteras');
+            if (linea.tipo_item === 'producto' && !Number.isInteger(recibida)) {
+                const [unidadProducto] = await connection.query(
+                    'SELECT um.permite_decimales FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?', [linea.item_id]
+                );
+                if (esEntero('producto', unidadProducto[0] || {})) throw new AlmacenError(400, `${linea.descripcion} se recibe en unidades enteras`);
+            }
             const diferencia = Math.round((linea.cantidad - recibida) * 1000) / 1000;
             if (diferencia > 0 && (!motivo || motivo.length < 3)) throw new AlmacenError(400, `Indique el motivo de la diferencia de ${linea.descripcion}`);
 
@@ -7682,13 +7721,26 @@ const sincronizarSunatPendientes = async () => {
 
 // El stock de productos admite decimales (cerveza por litros): la columna era INT en bases antiguas. Idempotente.
 const asegurarStockDecimal = async () => {
-    const [rows] = await pool.query(
-        "SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_productos' AND COLUMN_NAME = 'stock'"
-    );
-    if (rows[0] && String(rows[0].DATA_TYPE).toLowerCase() !== 'decimal') {
-        await pool.query('ALTER TABLE stock_productos MODIFY stock DECIMAL(12,3) NOT NULL DEFAULT 0');
-        console.log('stock_productos.stock convertido a DECIMAL(12,3)');
+    try {
+        const [rows] = await pool.query(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_productos' AND COLUMN_NAME = 'stock'"
+        );
+        if (rows[0] && String(rows[0].DATA_TYPE).toLowerCase() !== 'decimal') {
+            await pool.query('ALTER TABLE stock_productos MODIFY stock DECIMAL(12,3) NOT NULL DEFAULT 0');
+            console.log('stock_productos.stock convertido a DECIMAL(12,3)');
+        }
+    } catch (err) {
+        console.error('No se pudo convertir el stock de productos a decimal:', err.message);
     }
+    // Unidades de stock que descuenta cada unidad vendida (botella de 620 ml en un stock por litros: 0.62).
+    const [factor] = await pool.query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'productos' AND COLUMN_NAME = 'factor_venta'"
+    );
+    if (factor.length === 0) {
+        await pool.query('ALTER TABLE productos ADD COLUMN factor_venta DECIMAL(12,4) NOT NULL DEFAULT 1');
+        console.log('productos.factor_venta agregado');
+    }
+    tieneFactorVenta = true;
 };
 
 app.listen(PORT, () => {

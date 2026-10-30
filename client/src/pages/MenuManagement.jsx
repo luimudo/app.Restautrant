@@ -468,6 +468,23 @@ const MenuManagement = () => {
                                     </select>
                                     <p className="text-xs text-gray-500">Es la unidad que se envía a SUNAT en el comprobante electrónico.</p>
                                 </div>
+                                {!currentProduct.es_receta && (
+                                    <div className="space-y-2">
+                                        <label className="text-sm font-bold text-[var(--text-secondary)]">Stock que descuenta cada unidad vendida</label>
+                                        <input
+                                            type="number"
+                                            min="0.0001"
+                                            step="0.0001"
+                                            className="input"
+                                            value={currentProduct.factor_venta ?? 1}
+                                            onChange={(e) => setCurrentProduct({ ...currentProduct, factor_venta: e.target.value })}
+                                        />
+                                        <p className="text-xs text-gray-500">
+                                            Déjalo en 1 si vendes y controlas el stock en la misma unidad. Si el stock va en {currentProduct.unidad_medida || 'otra unidad'} y vendes por botella,
+                                            escribe cuánto lleva cada una (p. ej. 0.62 para una botella de 620 ml con stock en litros).
+                                        </p>
+                                    </div>
+                                )}
                                 <div className="flex items-center gap-6 pt-2">
                                     <label className="flex items-center gap-3 cursor-pointer group">
                                         <input
