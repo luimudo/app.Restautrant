@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-    Wrench, Plus, Search, AlertTriangle, Eye, Edit2, Play, CheckCircle2, XCircle, CalendarClock, Trash2, History, ShieldCheck
+    Wrench, Plus, Search, AlertTriangle, Eye, Edit2, Play, CheckCircle2, XCircle, CalendarClock, Trash2, History, ShieldCheck, Download
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { SUPERADMIN } from '../security/accessControl';
 import { addDaysYmd, formatDateTime, startOfMonthYmd, toPeruYmd } from '../utils/dateTime';
+import { descargarInventarioEquipos, descargarMantenimientosPendientes, descargarHistorialMantenimientos } from '../utils/exportEquipos';
 import { Modal, Field, ErrorBox, ToggleGroup } from '../components/billing/billingShared';
 import { METODOS_COBRO, money, readJson } from '../components/billing/billingUtils';
 
@@ -58,6 +59,10 @@ const Equipos = () => {
     const [histFilters, setHistFilters] = useState({ sede: defaultSede, desde: startOfMonthYmd(today), hasta: today });
     const [historial, setHistorial] = useState({ mantenimientos: [], resumen: null });
 
+    // Sede y periodo con los que se cargo cada pestana: el Excel descarga exactamente lo que muestra la grilla.
+    const [cargado, setCargado] = useState({});
+    const [exportando, setExportando] = useState(false);
+
     const [equipoForm, setEquipoForm] = useState(null);
     const [hojaVida, setHojaVida] = useState(null);
     const [fallaTarget, setFallaTarget] = useState(null);
@@ -80,10 +85,12 @@ const Equipos = () => {
                 if (filters.q.trim()) params.set('q', filters.q.trim());
                 const body = await readJson(await fetch(`/api/equipos?${params}`), 'No se pudo cargar el inventario.');
                 setInventario({ equipos: body.equipos || [], resumen: body.resumen });
+                setCargado((prev) => ({ ...prev, inventario: { sede: filters.sede } }));
             } else if (target === 'pendientes') {
                 sedeParam(params, filters);
                 const body = await readJson(await fetch(`/api/mantenimientos?${params}`), 'No se pudo cargar los mantenimientos.');
                 setPendientes({ mantenimientos: body.mantenimientos || [], resumen: body.resumen });
+                setCargado((prev) => ({ ...prev, pendientes: { sede: filters } }));
             } else {
                 sedeParam(params, filters.sede);
                 params.set('vista', 'historial');
@@ -91,6 +98,7 @@ const Equipos = () => {
                 params.set('hasta', filters.hasta);
                 const body = await readJson(await fetch(`/api/mantenimientos?${params}`), 'No se pudo cargar el historial.');
                 setHistorial({ mantenimientos: body.mantenimientos || [], resumen: body.resumen });
+                setCargado((prev) => ({ ...prev, historial: { sede: filters.sede, desde: filters.desde, hasta: filters.hasta } }));
             }
         } catch (e) {
             setError(e.message);
@@ -116,6 +124,26 @@ const Equipos = () => {
     }, []);
 
     const notify = (text) => { setError(''); setMessage(text); };
+
+    const filasExcel = tab === 'inventario' ? inventario.equipos : tab === 'pendientes' ? pendientes.mantenimientos : historial.mantenimientos;
+
+    const exportarExcel = async () => {
+        setExportando(true);
+        setError('');
+        try {
+            const sede = cargado[tab]?.sede ?? defaultSede;
+            const sedeNombre = isSuperadmin && sede === 'todas'
+                ? 'Todas las sedes'
+                : (sedes.find((x) => String(x.id) === String(isSuperadmin ? sede : activeSedeId))?.nombre || activeSede?.nombre || 'Sede');
+            if (tab === 'inventario') await descargarInventarioEquipos({ sedeNombre, equipos: inventario.equipos });
+            else if (tab === 'pendientes') await descargarMantenimientosPendientes({ sedeNombre, mantenimientos: pendientes.mantenimientos });
+            else await descargarHistorialMantenimientos({ sedeNombre, periodo: { desde: cargado.historial?.desde || histFilters.desde, hasta: cargado.historial?.hasta || histFilters.hasta }, mantenimientos: historial.mantenimientos });
+        } catch (e) {
+            setError('No se pudo generar el Excel.');
+        } finally {
+            setExportando(false);
+        }
+    };
 
     const openHojaVida = async (id) => {
         setError('');
@@ -186,11 +214,16 @@ const Equipos = () => {
                             : 'Consulta los equipos de tu sede y reporta cualquier averia.'}
                     </p>
                 </div>
-                {isAdmin && (
-                    <button className="btn btn-primary text-sm" onClick={() => setEquipoForm({})} disabled={!activeSedeId}>
-                        <Plus size={16} /> Nuevo Equipo
+                <div className="flex flex-wrap gap-2">
+                    <button className="btn btn-secondary text-sm" onClick={exportarExcel} disabled={exportando || loading || filasExcel.length === 0}>
+                        <Download size={16} /> {exportando ? 'Generando...' : 'Excel'}
                     </button>
-                )}
+                    {isAdmin && (
+                        <button className="btn btn-primary text-sm" onClick={() => setEquipoForm({})} disabled={!activeSedeId}>
+                            <Plus size={16} /> Nuevo Equipo
+                        </button>
+                    )}
+                </div>
             </div>
 
             {message && <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">{message}</div>}
