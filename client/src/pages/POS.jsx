@@ -56,6 +56,7 @@ const POS = () => {
                 const itemsForCart = data.detalles.map(d => ({
                     id: d.producto_id,
                     cart_key: `existing-${d.id}`,
+                    uid: `existing-${d.id}`,
                     detalle_id: d.id, // ID único de la línea de pedido
                     nombre: d.producto_nombre ?? d.nombre ?? 'Producto',
                     precio: d.precio_unitario ?? d.precio,
@@ -139,7 +140,8 @@ const POS = () => {
 
             const savedDetails = Array.isArray(result.detalles) ? result.detalles : [];
             const usedIds = new Set();
-            const savedCart = nextCart.map((item) => {
+            // Se mezcla con el carrito actual y no con la copia enviada: lo que el mozo escribio o cambio mientras se guardaba no se pierde.
+            setCart((current) => current.map((item) => {
                 const saved = item.isExisting
                     ? savedDetails.find((line) => Number(line.id) === Number(item.detalle_id))
                     : savedDetails.find((line) => Number(line.producto_id) === Number(item.id) && !usedIds.has(Number(line.id)));
@@ -147,16 +149,14 @@ const POS = () => {
                 usedIds.add(Number(saved.id));
                 return {
                     ...item,
+                    uid: item.uid || item.cart_key,
                     detalle_id: Number(saved.id),
                     cart_key: `existing-${saved.id}`,
                     precio: Number(saved.precio_unitario),
-                    cantidad: Number(saved.cantidad),
                     isExisting: true,
-                    estado_comanda: saved.estado_comanda,
-                    notas: saved.notas ?? item.notas ?? ''
+                    estado_comanda: saved.estado_comanda
                 };
-            });
-            setCart(savedCart);
+            }));
             setActiveOrder((current) => current ? { ...current, total: result.total, detalles: savedDetails } : current);
         } catch (error) {
             setSaveError(error.message || 'No se pudo actualizar la comanda.');
@@ -174,7 +174,7 @@ const POS = () => {
         if (existing) {
             nextCart = cart.map((item) => item.cart_key === cartKey ? { ...item, cantidad: item.cantidad + 1 } : item);
         } else {
-            nextCart = [...cart, { ...producto, cart_key: cartKey, cantidad: 1, isExisting: false, notas: '' }];
+            nextCart = [...cart, { ...producto, cart_key: cartKey, uid: cartKey, cantidad: 1, isExisting: false, notas: '' }];
         }
         setCart(nextCart);
         if (activeOrder) saveActiveOrder(nextCart);
@@ -206,7 +206,7 @@ const POS = () => {
 
     // Observacion opcional por plato (p. ej. "sin cebolla"). Se escribe en el carrito y, en una comanda abierta, se guarda al salir del campo.
     const updateNota = (cartKey, texto) => {
-        setCart((current) => current.map((item) => (item.cart_key === cartKey ? { ...item, notas: texto.slice(0, 200) } : item)));
+        setCart((current) => current.map((item) => ((item.uid || item.cart_key) === cartKey ? { ...item, notas: texto.slice(0, 200) } : item)));
     };
     const guardarNota = () => {
         if (activeOrder) saveActiveOrder(cart);
@@ -433,7 +433,7 @@ const POS = () => {
 
                     <div className="flex-1 overflow-y-auto p-4 space-y-4">
                         {cart.map((item, idx) => (
-                            <div key={item.cart_key || item.detalle_id || `cart-${idx}`} className="p-4 rounded-2xl bg-gray-50 border">
+                            <div key={item.uid || item.cart_key || item.detalle_id || `cart-${idx}`} className="p-4 rounded-2xl bg-gray-50 border">
                                 <div className="flex justify-between items-start">
                                     <div>
                                         <div className="flex items-center gap-2">
@@ -460,15 +460,15 @@ const POS = () => {
                                     </div>
                                     <p className="font-black">S/ {(item.cantidad * item.precio).toFixed(2)}</p>
                                 </div>
-                                {(item.notas || notasAbiertas[item.cart_key]) ? (
+                                {(item.notas || notasAbiertas[item.uid || item.cart_key]) ? (
                                     <div className="mt-3 flex items-start gap-2">
                                         <MessageSquare size={14} className="mt-2.5 shrink-0 text-brand-600" aria-hidden="true" />
                                         <input
                                             type="text"
                                             maxLength={200}
-                                            disabled={savingOrder}
+                                            autoFocus={Boolean(notasAbiertas[item.uid || item.cart_key]) && !item.notas}
                                             value={item.notas || ''}
-                                            onChange={(event) => updateNota(item.cart_key, event.target.value)}
+                                            onChange={(event) => updateNota(item.uid || item.cart_key, event.target.value)}
                                             onBlur={guardarNota}
                                             placeholder="Observación para la cocina (opcional)"
                                             aria-label={`Observación de ${item.nombre}`}
@@ -479,7 +479,7 @@ const POS = () => {
                                     <button
                                         type="button"
                                         disabled={savingOrder}
-                                        onClick={() => setNotasAbiertas((current) => ({ ...current, [item.cart_key]: true }))}
+                                        onClick={() => setNotasAbiertas((current) => ({ ...current, [item.uid || item.cart_key]: true }))}
                                         className="mt-2 flex items-center gap-1 text-[11px] font-bold text-brand-600 hover:underline disabled:opacity-50"
                                     >
                                         <MessageSquare size={12} /> Agregar observación
