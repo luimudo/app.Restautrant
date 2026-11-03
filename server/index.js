@@ -2891,7 +2891,8 @@ const facturaScope = (req, alias) => (isMultisede(req)
     : { where: `${alias}.sede_id = ?`, params: [req.userContext.sedeUsuarioId] });
 
 const FACTURA_SELECT_SQL = `
-    SELECT f.id, f.sede_id, s.nombre AS sede_nombre, f.pedido_id, f.cliente_id, f.tipo_comprobante, f.serie, f.numero,
+    SELECT f.id, f.sede_id, s.nombre AS sede_nombre, f.pedido_id, (f.pedido_id IS NULL AND f.documento_origen_id IS NULL) AS es_libre,
+           f.cliente_id, f.tipo_comprobante, f.serie, f.numero,
            f.numero_comprobante, f.fecha_emision, DATE_FORMAT(f.fecha_emision, '%Y-%m-%d') AS fecha,
            DATE_FORMAT(f.fecha_emision, '%H:%i') AS hora, f.subtotal, f.impuesto, f.igv_porcentaje, f.total_venta,
            f.condicion_pago, DATE_FORMAT(f.fecha_vencimiento, '%Y-%m-%d') AS fecha_vencimiento, f.monto_cobrado,
@@ -3001,6 +3002,9 @@ const calcularLineas = (detalles, tasa) => {
 
 const ddmmyyyy = (ymd) => ymd.split('-').reverse().join('-');
 
+/** SUNAT item code: products P<id>; free-invoice lines (negative id) L<line>. */
+const codigoLinea = (item) => item.codigo || (Number(item.producto_id) > 0 ? `P${item.producto_id}` : `L${Math.abs(Number(item.producto_id) || 0)}`);
+
 const buildComprobantePayload = ({ tipo, serie, numero, cliente, fecha, condicion, fechaVencimiento, metodo, tasa, calc, observacion }) => {
     const payload = {
         operacion: 'generar_comprobante',
@@ -3026,7 +3030,7 @@ const buildComprobantePayload = ({ tipo, serie, numero, cliente, fecha, condicio
         observaciones: observacion || '',
         items: calc.items.map((item) => ({
             unidad_de_medida: item.unidad_sunat || 'NIU',
-            codigo: `P${item.producto_id}`,
+            codigo: codigoLinea(item),
             descripcion: item.descripcion,
             cantidad: item.cantidad,
             valor_unitario: item.valor_unitario,
@@ -3443,6 +3447,161 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
     res.status(201).json({ ...detalle, total: detalle.total_venta, envio_error: envioError });
 });
 
+// --- Factura libre ---
+// Boleta, factura o nota de venta con items escritos a mano: sin pedido, sin stock y sin delivery. Usa las mismas series,
+// IGV, SUNAT, cobros y Cuentas por cobrar que una venta normal. Al contado se registra el cobro SIN pasar por la caja
+// (sesion_id NULL); al credito queda con fecha de vencimiento unica y se cobra desde Cuentas por cobrar.
+const LIBRE_MAX_ITEMS = 100;
+const LIBRE_MAX_TOTAL = 99999999;
+const textoLibre = (valor, max) => String(valor ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+
+// Datos que el formulario necesita para mostrar totales (el cajero no puede leer la configuracion completa).
+app.get('/api/facturas/libre/opciones', allowAdminOrCashier, async (req, res) => {
+    try {
+        const config = await getEmpresaConfig();
+        res.json({ igv_porcentaje: Number(config.igv_porcentaje) || 10.5, limite_boleta_anonima: BOLETA_LIMITE_ANONIMO });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/facturas/libre', allowAdminOrCashier, requireSede, async (req, res) => {
+    const body = req.body || {};
+    const tipo = String(body.tipo_comprobante || '').trim().toLowerCase();
+    const condicion = String(body.condicion_pago || 'contado').trim().toLowerCase();
+    const cliente = parseClienteInput(body.cliente);
+    const metodo = String(body.pago?.metodo_pago || '').trim().toLowerCase();
+    const referencia = String(body.pago?.referencia || '').trim().slice(0, 100) || null;
+    const fechaVencimiento = String(body.fecha_vencimiento || '').trim();
+    const observacion = String(body.observacion || '').trim().slice(0, 255) || null;
+    const incluyeIgv = body.precios_incluyen_igv !== false;
+    const sedeId = sedeOf(req);
+    const hoy = todayLocal();
+
+    const errors = [];
+    if (!TIPOS_COMPROBANTE.includes(tipo)) errors.push('El comprobante debe ser boleta, factura o nota de venta');
+    if (!['contado', 'credito'].includes(condicion)) errors.push('La condicion de pago debe ser contado o credito');
+    if (condicion === 'contado' && !METODOS_COBRO.includes(metodo)) errors.push('Seleccione el metodo de pago');
+    if (condicion === 'credito') {
+        if (!isRealDate(fechaVencimiento) || fechaVencimiento <= hoy) errors.push('La fecha de vencimiento del credito debe ser posterior a hoy');
+        if (cliente.tipo_doc === '-') errors.push('Una venta al credito requiere identificar al cliente');
+    }
+    const entrada = Array.isArray(body.items) ? body.items : [];
+    if (entrada.length === 0 || entrada.length > LIBRE_MAX_ITEMS) errors.push(`Agregue entre 1 y ${LIBRE_MAX_ITEMS} items`);
+    const items = [];
+    entrada.slice(0, LIBRE_MAX_ITEMS).forEach((item, index) => {
+        const descripcion = textoLibre(item?.descripcion, 250);
+        const cantidad = Math.round(Number(item?.cantidad) * 1000) / 1000;
+        const precio = Math.round(Number(item?.precio_unitario) * 10000) / 10000;
+        if (descripcion.length < 3) errors.push(`Item ${index + 1}: ingrese la descripcion (minimo 3 caracteres)`);
+        else if (!(cantidad > 0) || cantidad > 999999) errors.push(`Item ${index + 1}: la cantidad debe ser mayor a 0`);
+        else if (!(precio > 0) || precio > LIBRE_MAX_TOTAL) errors.push(`Item ${index + 1}: el precio debe ser mayor a 0`);
+        else items.push({ descripcion, cantidad, precio });
+    });
+    if (errors.length > 0) return res.status(400).json({ error: errors.join('. ') });
+
+    const connection = await pool.getConnection();
+    let facturaId;
+    try {
+        await connection.beginTransaction();
+
+        const docError = validarDocumentoCliente(cliente);
+        if (docError) throw new FacturacionError(400, docError);
+        if (tipo === 'factura' && cliente.tipo_doc !== 'RUC') throw new FacturacionError(400, 'La factura requiere el RUC del cliente');
+        if (tipo === 'boleta' && !['-', 'DNI'].includes(cliente.tipo_doc)) throw new FacturacionError(400, 'La boleta se emite con DNI del cliente (o sin documento). Para un cliente con RUC emita una factura');
+        if (tipo === 'factura' && !cliente.direccion) throw new FacturacionError(400, 'Ingrese la direccion fiscal del cliente');
+
+        const config = await getEmpresaConfig(connection);
+        if (!config.razon_social) throw new FacturacionError(409, 'Configure los datos de la empresa en Configuracion > Facturacion electronica');
+        const electronico = TIPOS_ELECTRONICOS.includes(tipo);
+        if (electronico) {
+            if (!config.ruc) throw new FacturacionError(409, 'Configure el RUC de la empresa en Configuracion > Facturacion electronica');
+            facturacion.validarCredenciales(config);
+        }
+
+        const [corrRows] = await connection.query(
+            'SELECT serie, siguiente_numero FROM correlativos WHERE tipo = ? AND sede_id = ? FOR UPDATE',
+            [tipo, sedeId]
+        );
+        if (corrRows.length === 0) throw new FacturacionError(409, `No hay serie configurada para ${tipo.replace('_', ' ')} en esta sede`);
+        const { serie, siguiente_numero: numero } = corrRows[0];
+        if (!SERIE_REGEX[tipo].test(serie)) {
+            throw new FacturacionError(409, `La serie ${serie} no es valida para ${tipo}: debe ser ${tipo === 'factura' ? 'Fxxx' : 'Bxxx'} (4 caracteres)`);
+        }
+
+        // calcularLineas works with prices that include IGV: a price without IGV is raised first. Free lines use negative ids (-1, -2...)
+        // so a credit note can still point at each line.
+        const tasa = Number(config.igv_porcentaje) || 10.5;
+        const factor = 1 + tasa / 100;
+        const detalles = items.map((item, index) => ({
+            producto_id: -(index + 1),
+            descripcion: item.descripcion,
+            cantidad: item.cantidad,
+            precio_unitario: incluyeIgv ? item.precio : Math.round(item.precio * factor * 10000) / 10000,
+            unidad_sunat: 'NIU'
+        }));
+        const calc = calcularLineas(detalles, tasa);
+        if (!(calc.total > 0)) throw new FacturacionError(409, 'El total del comprobante debe ser mayor a 0');
+        if (calc.total > LIBRE_MAX_TOTAL) throw new FacturacionError(400, 'El total del comprobante es demasiado alto');
+        if (tipo === 'boleta' && calc.total >= BOLETA_LIMITE_ANONIMO && cliente.tipo_doc === '-') {
+            throw new FacturacionError(400, `Una boleta desde S/ ${BOLETA_LIMITE_ANONIMO} debe identificar al cliente (DNI)`);
+        }
+
+        const clienteId = (await upsertCliente(connection, cliente)) || null;
+        const [sedeRows] = await connection.query('SELECT direccion, telefono FROM sedes WHERE id = ?', [sedeId]);
+        const empresaSnapshot = {
+            ruc: config.ruc, razon_social: config.razon_social, nombre_comercial: config.nombre_comercial,
+            direccion: sedeRows[0]?.direccion || config.direccion, telefono: sedeRows[0]?.telefono || config.telefono
+        };
+        const payload = electronico
+            ? buildComprobantePayload({ tipo, serie, numero, cliente, fecha: hoy, condicion, fechaVencimiento, metodo, tasa, calc, observacion })
+            : null;
+
+        const [result] = await connection.query(
+            `INSERT INTO facturas
+                (sede_id, pedido_id, cliente_id, tipo_comprobante, numero_comprobante, serie, numero, subtotal, igv_porcentaje,
+                 total_venta, impuesto, sesion_caja_id, condicion_pago, fecha_vencimiento, monto_cobrado, cliente_tipo_doc,
+                 cliente_num_doc, cliente_nombre, cliente_direccion, observacion, usuario_id, estado_sunat, ambiente,
+                 nubefact_payload, empresa_snapshot, items_snapshot)
+             VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [sedeId, clienteId, tipo, `${serie}-${String(numero).padStart(8, '0')}`, serie, numero, calc.gravada, tasa,
+                calc.total, calc.igv, condicion, condicion === 'credito' ? fechaVencimiento : null,
+                condicion === 'contado' ? calc.total : 0, cliente.tipo_doc, cliente.num_doc, cliente.nombre || 'CLIENTES VARIOS',
+                cliente.direccion, observacion, req.userContext.id, electronico ? 'pendiente' : 'no_aplica',
+                electronico ? config.nubefact_ambiente : null, payload ? JSON.stringify(payload) : null,
+                JSON.stringify(empresaSnapshot), JSON.stringify(calc.items)]
+        );
+        facturaId = result.insertId;
+
+        if (condicion === 'contado') {
+            // Without a caja session: the collection is registered but never enters a cash count.
+            await connection.query(
+                `INSERT INTO cobros_venta (factura_id, sede_id, monto, metodo_pago, referencia, sesion_id, usuario_id)
+                 VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+                [facturaId, sedeId, calc.total, metodo, referencia, req.userContext.id]
+            );
+        }
+        await connection.query('UPDATE correlativos SET siguiente_numero = siguiente_numero + 1 WHERE tipo = ? AND sede_id = ?', [tipo, sedeId]);
+        await connection.commit();
+    } catch (err) {
+        await connection.rollback();
+        connection.release();
+        return sendFacturacionError(res, err);
+    }
+    connection.release();
+
+    // The receipt is already issued; a sending problem is reported but never undoes it.
+    let envioError = null;
+    try {
+        const config = await getEmpresaConfig();
+        if (TIPOS_ELECTRONICOS.includes(tipo) && Number(config.envio_automatico) && body.enviar_sunat !== false) await procesarSunat(facturaId, 'enviar');
+    } catch (err) {
+        envioError = err.message;
+    }
+    const detalle = await findFacturaDetalle(req, facturaId);
+    res.status(201).json({ ...detalle, total: detalle.total_venta, envio_error: envioError });
+});
+
 app.get('/api/facturas', allowAdminOrCashier, async (req, res) => {
     const { desde, hasta, tipo, estado_sunat: estadoSunat, condicion_pago: condicion, q } = req.query;
     const startDate = typeof desde === 'string' && isRealDate(desde) ? desde : todayLocal();
@@ -3681,8 +3840,10 @@ app.post('/api/facturas/:id/notas', allowAdmin, async (req, res) => {
         if (devolver > 0) {
             const metodo = String(body.devolucion?.metodo_pago || '').trim().toLowerCase();
             if (!METODOS_COBRO.includes(metodo)) throw new FacturacionError(400, `El cliente ya pago: indique como se le devuelven S/ ${devolver.toFixed(2)}`);
-            const sesionId = await openCashSession(connection, origen.sede_id);
-            if (metodo === 'efectivo') {
+            // A free invoice was never collected through a caja, so its refund does not go through one either.
+            const esLibre = !origen.pedido_id;
+            const sesionId = esLibre ? null : await openCashSession(connection, origen.sede_id);
+            if (metodo === 'efectivo' && !esLibre) {
                 if (!sesionId) throw new FacturacionError(409, 'Para devolver en efectivo abra la caja de la sede');
                 const summary = await buildCashSessionSummary(connection, sesionId, origen.sede_id);
                 if (devolver > Number(summary.resumen.monto_teorico)) {
@@ -3729,7 +3890,7 @@ app.post('/api/facturas/:id/notas', allowAdmin, async (req, res) => {
             enviar_automaticamente_al_cliente: false,
             items: calc.items.map((item) => ({
                 unidad_de_medida: item.codigo === 'AJUSTE' ? 'ZZ' : item.unidad_sunat || 'NIU',
-                codigo: item.codigo || `P${item.producto_id}`,
+                codigo: codigoLinea(item),
                 descripcion: item.descripcion,
                 cantidad: item.cantidad,
                 valor_unitario: item.valor_unitario,
@@ -6625,7 +6786,7 @@ app.get('/api/guias/remitente/:origen/:id/items', allowAdmin, requireSede, async
             const [previa] = await pool.query("SELECT id FROM guias WHERE factura_id = ? AND tipo = 'remitente' AND estado <> 'anulada' LIMIT 1", [factura.id]);
             if (previa.length) return res.status(409).json({ error: 'El comprobante ya tiene una guía remitente.' });
             items = (await facturaItems(factura.id)).map((item) => ({
-                codigo: `P${item.producto_id}`, descripcion: item.descripcion,
+                codigo: codigoLinea(item), descripcion: item.descripcion,
                 cantidad: Number(item.cantidad), unidad_medida: item.unidad_sunat || 'NIU'
             }));
         } else {
@@ -6797,7 +6958,7 @@ app.post('/api/guias/remitente', allowAdmin, requireSede, async (req, res) => {
             const [previa] = await connection.query("SELECT id FROM guias WHERE factura_id = ? AND tipo = 'remitente' AND estado <> 'anulada'", [factura.id]);
             if (previa.length > 0) throw new AlmacenError(409, 'El comprobante ya tiene una guia remitente');
             items = (await facturaItems(factura.id)).map((i) => ({
-                codigo: `P${i.producto_id}`, descripcion: i.descripcion, cantidad: Number(i.cantidad), unidad_medida: i.unidad_sunat || 'NIU'
+                codigo: codigoLinea(i), descripcion: i.descripcion, cantidad: Number(i.cantidad), unidad_medida: i.unidad_sunat || 'NIU'
             }));
             destinatario = { tipo: factura.cliente_tipo_doc === 'RUC' ? '6' : '1', numero: factura.cliente_num_doc, nombre: factura.cliente_nombre, direccion: llegada.direccion };
             refs = { factura_id: factura.id, almacen_id: await almacenPorDefecto(connection, sedeId, 'ventas'), motivo: '01', texto: `${factura.tipo_comprobante === 'factura' ? 'Factura' : 'Boleta'} ${factura.numero_comprobante}`, factura };

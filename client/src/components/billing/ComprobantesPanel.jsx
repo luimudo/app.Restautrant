@@ -268,7 +268,7 @@ const ComprobantesPanel = ({ refreshKey, onChanged }) => {
                                             <td className="px-5 py-3 text-sm whitespace-nowrap">{formatDateTime(f.fecha_emision)}</td>
                                             <td className="px-5 py-3">
                                                 <p className="font-black font-mono text-sm">{f.numero_comprobante}</p>
-                                                <p className="text-[11px] text-gray-500">{TIPO_LABEL[f.tipo_comprobante]}{f.mesa_numero ? ` · Mesa ${f.mesa_numero}` : ''}</p>
+                                                <p className="text-[11px] text-gray-500">{TIPO_LABEL[f.tipo_comprobante]}{f.mesa_numero ? ` · Mesa ${f.mesa_numero}` : ''}{Number(f.es_libre) === 1 ? ' · Libre' : ''}</p>
                                                 {esNota(f) && <p className="text-[11px] text-gray-500">Modifica {f.origen_numero}</p>}
                                                 {f.estado_comercial === 'anulado' && <p className="text-[10px] font-black text-rose-600 uppercase">Anulado por nota de crédito</p>}
                                             </td>

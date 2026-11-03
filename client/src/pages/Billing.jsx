@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, CreditCard, Receipt, Printer, Clock, Banknote, Landmark, X, Download, BarChart3, RefreshCw, Pencil, FileDown } from 'lucide-react';
+import { FileText, CreditCard, Receipt, Printer, Clock, Banknote, Landmark, X, Download, BarChart3, RefreshCw, Pencil, FileDown, FilePlus2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatTime, startOfMonthYmd, toPeruYmd } from '../utils/dateTime';
 import EmitirComprobanteModal from '../components/billing/EmitirComprobanteModal';
+import FacturaLibreModal from '../components/billing/FacturaLibreModal';
 import EditComandaModal from '../components/billing/EditComandaModal';
 import { descargarReporteVentasExcel } from '../utils/exportVentas';
 import { BotonesInformeArqueo, HistorialArqueos } from '../components/billing/ArqueoInformes';
@@ -16,6 +17,7 @@ const Billing = () => {
 
     const [pedidos, setPedidos] = useState([]);
     const [cobrarPedido, setCobrarPedido] = useState(null);
+    const [facturaLibreOpen, setFacturaLibreOpen] = useState(false);
     const [editarPedido, setEditarPedido] = useState(null);
     const [comprobantesKey, setComprobantesKey] = useState(0);
     const [loading, setLoading] = useState(true);
@@ -400,7 +402,10 @@ const Billing = () => {
                     </h2>
                     <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Gestiona los cobros de tus mesas y emite comprobantes electrónicos.</p>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex flex-wrap gap-3">
+                    <button onClick={() => setFacturaLibreOpen(true)} className="btn btn-secondary bg-white border border-[var(--border-color)] text-[var(--text-secondary)]">
+                        <FilePlus2 size={18} /> Factura libre
+                    </button>
                     <button onClick={openCashAudit} className="btn btn-secondary bg-white border border-[var(--border-color)] text-[var(--text-secondary)]">
                         <Banknote size={18} /> Arqueo de Caja
                     </button>
@@ -565,6 +570,16 @@ const Billing = () => {
             )}
 
             {showHistorialArqueos && <HistorialArqueos onClose={() => setShowHistorialArqueos(false)} />}
+
+            {facturaLibreOpen && (
+                <FacturaLibreModal
+                    onClose={() => setFacturaLibreOpen(false)}
+                    onEmitido={() => {
+                        setComprobantesKey((key) => key + 1);
+                        fetchTotalHoy();
+                    }}
+                />
+            )}
 
             {cobrarPedido && (
                 <EmitirComprobanteModal pedido={cobrarPedido} onClose={() => setCobrarPedido(null)} onEmitido={handleEmitido} />
