@@ -2259,6 +2259,9 @@ app.delete('/api/productos/:id', allowAdminKitchenForWrites, async (req, res) =>
 });
 
 // --- Pedidos ---
+// Observacion opcional de un plato ("sin cebolla", "punto medio"): texto corto, la cocina la ve con un boton.
+const notaPlato = (valor) => String(valor ?? '').trim().replace(/s+/g, ' ').slice(0, 200);
+
 app.get('/api/pedidos/mesa/:mesaId/activo', allowAdminWaiterCashier, requireSede, async (req, res) => {
     try {
         const [pedidos] = await pool.query(`
@@ -2524,7 +2527,7 @@ app.post('/api/pedidos', allowAdminOrWaiter, requireSede, async (req, res) => {
 
             await connection.query(
                 'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, item.notas || '']
+                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, notaPlato(item.notas)]
             );
         }
 
@@ -2596,11 +2599,11 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
                     throw Object.assign(new Error('Una de las lineas ya no corresponde a esta comanda. Recarga e intenta nuevamente.'), { status: 409 });
                 }
                 seenDetailIds.add(detailId);
-                normalizedItems.push({ detailId, productId, quantity, price: Number(existing.precio_unitario) });
+                normalizedItems.push({ detailId, productId, quantity, price: Number(existing.precio_unitario), notas: typeof item.notas === 'string' ? notaPlato(item.notas) : null });
             } else {
                 const [products] = await connection.query('SELECT precio FROM productos WHERE id = ? AND disponible = 1 LIMIT 1', [productId]);
                 if (!products.length) throw Object.assign(new Error('Uno de los productos agregados ya no esta disponible.'), { status: 409 });
-                normalizedItems.push({ detailId: null, productId, quantity, price: Number(products[0].precio) });
+                normalizedItems.push({ detailId: null, productId, quantity, price: Number(products[0].precio), notas: notaPlato(item.notas) });
             }
         }
 
@@ -2608,13 +2611,13 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
             const subtotal = Math.round(item.price * 100) * item.quantity / 100;
             if (item.detailId !== null) {
                 await connection.query(
-                    'UPDATE detalles_pedido SET cantidad = ?, subtotal = ? WHERE id = ? AND pedido_id = ?',
-                    [item.quantity, subtotal, item.detailId, order.id]
+                    'UPDATE detalles_pedido SET cantidad = ?, subtotal = ?, notas = COALESCE(?, notas) WHERE id = ? AND pedido_id = ?',
+                    [item.quantity, subtotal, item.notas, item.detailId, order.id]
                 );
             } else {
                 await connection.query(
                     'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                    [order.id, item.productId, item.quantity, item.price, subtotal, '']
+                    [order.id, item.productId, item.quantity, item.price, subtotal, item.notas || '']
                 );
             }
         }
@@ -2626,7 +2629,7 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
         const total = Number(totals[0]?.total || 0);
         await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, order.id]);
         const [savedRows] = await connection.query(
-            `SELECT dp.id, dp.id AS detalle_id, dp.producto_id, dp.cantidad, dp.precio_unitario, dp.subtotal,
+            `SELECT dp.id, dp.id AS detalle_id, dp.producto_id, dp.cantidad, dp.precio_unitario, dp.subtotal, dp.notas,
                     p.nombre AS producto_nombre, dp.estado_comanda
              FROM detalles_pedido dp JOIN productos p ON p.id = dp.producto_id
              WHERE dp.pedido_id = ? ORDER BY dp.id`,
@@ -2665,7 +2668,7 @@ app.put('/api/pedidos/:id/items', allowAdminOrWaiter, requireSede, async (req, r
 
             await connection.query(
                 'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, item.notas || '']
+                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, notaPlato(item.notas)]
             );
         }
 

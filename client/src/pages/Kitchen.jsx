@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 const KitchenPage = () => {
     const [pedidos, setPedidos] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [notasVistas, setNotasVistas] = useState({}); // observaciones de plato desplegadas por el cocinero
 
     useEffect(() => {
         fetchPedidos();
@@ -110,9 +111,18 @@ const KitchenPage = () => {
                                 </p>
 
                                 {item.notas && (
-                                    <div className="mt-3 text-[10px] font-bold text-red-500 bg-red-50/50 p-2 rounded-xl border border-red-100 flex items-start gap-2">
-                                        <MessageSquare size={12} className="shrink-0 mt-0.5" />
-                                        <span>{item.notas}</span>
+                                    <div className="mt-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setNotasVistas((current) => ({ ...current, [item.detalle_id]: !current[item.detalle_id] }))}
+                                            aria-expanded={Boolean(notasVistas[item.detalle_id])}
+                                            className="flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-red-600 hover:bg-red-100"
+                                        >
+                                            <MessageSquare size={12} /> {notasVistas[item.detalle_id] ? 'Ocultar observación' : 'Ver observación'}
+                                        </button>
+                                        {notasVistas[item.detalle_id] && (
+                                            <p className="mt-2 rounded-xl border border-red-100 bg-red-50/60 p-3 text-xs font-bold text-red-600 break-words">{item.notas}</p>
+                                        )}
                                     </div>
                                 )}
                             </motion.div>

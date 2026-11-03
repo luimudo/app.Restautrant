@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShoppingCart, Utensils, User, CheckCircle, XCircle, Plus, Minus, Search, ChevronLeft, Trash2, ArrowRight, LoaderCircle, Printer as PrinterIcon, Merge } from 'lucide-react';
+import { ShoppingCart, Utensils, User, CheckCircle, XCircle, Plus, Minus, Search, ChevronLeft, Trash2, ArrowRight, LoaderCircle, Printer as PrinterIcon, Merge, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import { imprimirPreCuenta } from '../utils/printDocs';
@@ -12,6 +12,8 @@ const POS = () => {
     const [productos, setProductos] = useState([]);
     const [selectedMesa, setSelectedMesa] = useState(null);
     const [cart, setCart] = useState([]);
+    const [notasAbiertas, setNotasAbiertas] = useState({}); // lineas del carrito con el campo de observacion desplegado
+    useEffect(() => { setNotasAbiertas({}); }, [selectedMesa?.id]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedCategory, setSelectedCategory] = useState('all');
@@ -60,7 +62,8 @@ const POS = () => {
                     cantidad: d.cantidad,
                     isExisting: true,
                     estado_comanda: d.estado_comanda,
-                    es_barra: d.es_barra
+                    es_barra: d.es_barra,
+                    notas: d.notas || ''
                 }));
                 setCart(itemsForCart);
             } else {
@@ -126,7 +129,8 @@ const POS = () => {
                     detalles: nextCart.map((item) => ({
                         ...(item.isExisting ? { detalle_id: item.detalle_id } : {}),
                         producto_id: item.id,
-                        cantidad: Number(item.cantidad)
+                        cantidad: Number(item.cantidad),
+                        notas: item.notas || ''
                     }))
                 })
             });
@@ -148,7 +152,8 @@ const POS = () => {
                     precio: Number(saved.precio_unitario),
                     cantidad: Number(saved.cantidad),
                     isExisting: true,
-                    estado_comanda: saved.estado_comanda
+                    estado_comanda: saved.estado_comanda,
+                    notas: saved.notas ?? item.notas ?? ''
                 };
             });
             setCart(savedCart);
@@ -169,7 +174,7 @@ const POS = () => {
         if (existing) {
             nextCart = cart.map((item) => item.cart_key === cartKey ? { ...item, cantidad: item.cantidad + 1 } : item);
         } else {
-            nextCart = [...cart, { ...producto, cart_key: cartKey, cantidad: 1, isExisting: false }];
+            nextCart = [...cart, { ...producto, cart_key: cartKey, cantidad: 1, isExisting: false, notas: '' }];
         }
         setCart(nextCart);
         if (activeOrder) saveActiveOrder(nextCart);
@@ -199,11 +204,20 @@ const POS = () => {
         if (activeOrder) saveActiveOrder(nextCart);
     };
 
+    // Observacion opcional por plato (p. ej. "sin cebolla"). Se escribe en el carrito y, en una comanda abierta, se guarda al salir del campo.
+    const updateNota = (cartKey, texto) => {
+        setCart((current) => current.map((item) => (item.cart_key === cartKey ? { ...item, notas: texto.slice(0, 200) } : item)));
+    };
+    const guardarNota = () => {
+        if (activeOrder) saveActiveOrder(cart);
+    };
+
     const total = cart.reduce((acc, curr) => acc + (curr.precio * curr.cantidad), 0);
     const activeDetailsById = new Map((activeOrder?.detalles || []).map((item) => [Number(item.id), item]));
     const orderHasChanges = !activeOrder || cart.some((item) => !item.isExisting)
         || cart.filter((item) => item.isExisting).length !== (activeOrder.detalles || []).length
-        || cart.some((item) => item.isExisting && Number(item.cantidad) !== Number(activeDetailsById.get(Number(item.detalle_id))?.cantidad));
+        || cart.some((item) => item.isExisting && Number(item.cantidad) !== Number(activeDetailsById.get(Number(item.detalle_id))?.cantidad))
+        || cart.some((item) => item.isExisting && (item.notas || '') !== (activeDetailsById.get(Number(item.detalle_id))?.notas || ''));
 
     const generatePreCuenta = async () => {
         if (!selectedMesa || cart.length === 0) return;
@@ -241,7 +255,8 @@ const POS = () => {
                 detalles: cart.map(item => ({
                     ...(item.isExisting ? { detalle_id: item.detalle_id } : {}),
                     producto_id: item.id,
-                    cantidad: Number(item.cantidad)
+                    cantidad: Number(item.cantidad),
+                    notas: item.notas || ''
                 }))
             } : {
                 mesa_id: selectedMesa.id,
@@ -249,7 +264,7 @@ const POS = () => {
                 detalles: cart.map(item => ({
                     producto_id: item.id,
                     cantidad: item.cantidad,
-                    notas: ''
+                    notas: item.notas || ''
                 }))
             };
 
@@ -445,6 +460,31 @@ const POS = () => {
                                     </div>
                                     <p className="font-black">S/ {(item.cantidad * item.precio).toFixed(2)}</p>
                                 </div>
+                                {(item.notas || notasAbiertas[item.cart_key]) ? (
+                                    <div className="mt-3 flex items-start gap-2">
+                                        <MessageSquare size={14} className="mt-2.5 shrink-0 text-brand-600" aria-hidden="true" />
+                                        <input
+                                            type="text"
+                                            maxLength={200}
+                                            disabled={savingOrder}
+                                            value={item.notas || ''}
+                                            onChange={(event) => updateNota(item.cart_key, event.target.value)}
+                                            onBlur={guardarNota}
+                                            placeholder="Observación para la cocina (opcional)"
+                                            aria-label={`Observación de ${item.nombre}`}
+                                            className="input py-2 text-xs"
+                                        />
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        disabled={savingOrder}
+                                        onClick={() => setNotasAbiertas((current) => ({ ...current, [item.cart_key]: true }))}
+                                        className="mt-2 flex items-center gap-1 text-[11px] font-bold text-brand-600 hover:underline disabled:opacity-50"
+                                    >
+                                        <MessageSquare size={12} /> Agregar observación
+                                    </button>
+                                )}
                             </div>
                         ))}
                     </div>
