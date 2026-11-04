@@ -109,6 +109,29 @@ const POS = () => {
         }
     };
 
+    // La mesa se libera solo mientras cocina/barra tenga TODO en "Recibido" (nada empezo a prepararse).
+    const puedeLiberar = Boolean(activeOrder) && cart.length > 0
+        && cart.every((item) => item.isExisting && (item.estado_comanda || 'pendiente') === 'pendiente');
+
+    const liberarMesa = async () => {
+        if (!selectedMesa || !puedeLiberar) return;
+        if (!window.confirm(`¿Liberar la Mesa ${selectedMesa.numero}? Se cancelará la comanda: cocina y barra aún no empezaron a prepararla.`)) return;
+        setSavingOrder(true);
+        setSaveError('');
+        try {
+            const res = await fetch(`/api/pedidos/mesa/${selectedMesa.id}/liberar`, { method: 'POST' });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.error || 'No se pudo liberar la mesa.');
+            setSelectedMesa(null);
+            await fetchData();
+        } catch (error) {
+            setSaveError(error.message);
+            alert(error.message);
+        } finally {
+            setSavingOrder(false);
+        }
+    };
+
     const getStatusDisplay = (estado) => {
         switch (estado) {
             case 'pendiente': return { label: 'Pendiente', color: 'bg-red-500', text: 'text-red-600' };
@@ -495,8 +518,22 @@ const POS = () => {
                             <span className="font-black text-2xl text-brand-600">S/ {total.toFixed(2)}</span>
                         </div>
                         
+                        {activeOrder && (
+                            <button
+                                type="button"
+                                onClick={liberarMesa}
+                                disabled={!puedeLiberar || savingOrder}
+                                title={puedeLiberar ? 'Cancela la comanda y deja la mesa libre' : 'Solo se puede liberar si cocina y barra tienen todo en Recibido'}
+                                className="w-full py-2.5 bg-white border border-red-200 text-red-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-red-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                                Liberar mesa
+                            </button>
+                        )}
+                        {activeOrder && !puedeLiberar && (
+                            <p className="text-[10px] text-center text-gray-500">Se libera solo si todo está en «Recibido» (cocina/barra no empezó).</p>
+                        )}
                         <div className="grid grid-cols-2 gap-3">
-                            <button 
+                            <button
                                 onClick={generatePreCuenta}
                                 disabled={cart.length === 0 || savingOrder}
                                 className="py-3 bg-white border border-brand-200 text-brand-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-brand-50 transition-all flex items-center justify-center gap-2 shadow-sm"

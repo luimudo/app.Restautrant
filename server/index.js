@@ -1346,6 +1346,7 @@ app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
                 SELECT p2.estado
                 FROM pedidos p2
                 WHERE p2.mesa_id = m.id
+                  AND p2.estado <> 'cancelado'
                   AND EXISTS (
                       SELECT 1
                       FROM detalles_pedido dp2
@@ -2260,7 +2261,7 @@ app.delete('/api/productos/:id', allowAdminKitchenForWrites, async (req, res) =>
 
 // --- Pedidos ---
 // Observacion opcional de un plato ("sin cebolla", "punto medio"): texto corto, la cocina la ve con un boton.
-const notaPlato = (valor) => String(valor ?? '').trim().replace(/s+/g, ' ').slice(0, 200);
+const notaPlato = (valor) => String(valor ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
 
 app.get('/api/pedidos/mesa/:mesaId/activo', allowAdminWaiterCashier, requireSede, async (req, res) => {
     try {
@@ -2294,6 +2295,44 @@ app.get('/api/pedidos/mesa/:mesaId/activo', allowAdminWaiterCashier, requireSede
         res.json({ ...pedido, detalles });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Libera una mesa cuya comanda sigue "Recibida" en cocina/barra: ninguna linea empezo a prepararse. La comanda se cancela
+// (el stock se descuenta recien al facturar, asi que no hay nada que restituir) y la mesa queda libre.
+app.post('/api/pedidos/mesa/:mesaId/liberar', allowAdminOrWaiter, requireSede, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const [pedidos] = await connection.query(
+            `SELECT p.id FROM pedidos p
+             WHERE p.mesa_id = ? AND p.sede_id = ? AND p.estado NOT IN ('pagado', 'cancelado')
+               AND EXISTS (SELECT 1 FROM detalles_pedido dp WHERE dp.pedido_id = p.id)
+             ORDER BY p.fecha_creacion ASC FOR UPDATE`,
+            [req.params.mesaId, sedeOf(req)]
+        );
+        if (pedidos.length === 0) throw Object.assign(new Error('La mesa no tiene una comanda abierta.'), { status: 409 });
+        const ids = pedidos.map((p) => p.id);
+
+        const [facturados] = await connection.query('SELECT 1 FROM facturas WHERE pedido_id IN (?) LIMIT 1', [ids]);
+        if (facturados.length > 0) throw Object.assign(new Error('La comanda ya tiene comprobante: no se puede liberar la mesa.'), { status: 409 });
+
+        const [avanzados] = await connection.query(
+            "SELECT 1 FROM detalles_pedido WHERE pedido_id IN (?) AND estado_comanda <> 'pendiente' LIMIT 1",
+            [ids]
+        );
+        if (avanzados.length > 0) {
+            throw Object.assign(new Error('No se puede liberar la mesa: cocina o barra ya empezo a preparar algun producto. Solo se libera mientras todos sigan en Recibido.'), { status: 409 });
+        }
+
+        await connection.query("UPDATE pedidos SET estado = 'cancelado', total = 0 WHERE id IN (?)", [ids]);
+        await connection.commit();
+        res.json({ message: 'Mesa liberada', comandas_canceladas: ids.length });
+    } catch (err) {
+        await connection.rollback();
+        res.status(err.status || 500).json({ error: err.message });
+    } finally {
+        connection.release();
     }
 });
 
