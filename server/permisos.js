@@ -32,8 +32,12 @@ const MODULOS = [
     { clave: 'receivables', nombre: 'Cuentas por cobrar' },
     { clave: 'sedes', nombre: 'Sedes' },
     { clave: 'settings', nombre: 'Configuración y usuarios' },
-    { clave: 'help', nombre: 'Ayuda' }
+    { clave: 'help', nombre: 'Ayuda' },
+    // No es una pantalla: habilita aplicar descuentos % (por plato y global) en el punto de venta.
+    { clave: 'descuentos', nombre: 'Aplicar descuentos en el punto de venta' }
 ];
+// Perfiles que reciben el permiso de descuentos la primera vez que se crea (despues manda la pantalla de permisos).
+const PERFILES_CON_DESCUENTO = ['administrador', 'caja', 'supervisor'];
 const MODULO_CLAVES = MODULOS.map((m) => m.clave);
 const BASES = ['administrador', 'mozo', 'caja', 'cocina'];
 
@@ -51,7 +55,7 @@ const SEMILLA = [
     {
         codigo: 'caja', nombre: 'Cajero', base: 'caja', alcance: 'sede', sistema: 1,
         descripcion: 'Solo información de su sede.',
-        modulos: ['dashboard', 'pos', 'delivery', 'reservations', 'kitchen', 'bar', 'billing']
+        modulos: ['dashboard', 'pos', 'delivery', 'reservations', 'kitchen', 'bar', 'billing', 'descuentos']
     },
     {
         codigo: 'cocina', nombre: 'Cocina', base: 'cocina', alcance: 'sede', sistema: 1,
@@ -66,7 +70,7 @@ const SEMILLA = [
     {
         codigo: 'supervisor', nombre: 'Supervisor', base: 'administrador', alcance: 'sede', sistema: 0,
         descripcion: 'Acceso solo a su sede.',
-        modulos: ['dashboard', 'pos', 'delivery', 'reservations', 'menu', 'kitchen', 'bar', 'inventory', 'purchases', 'warehouses', 'equipment', 'expenses', 'reminders', 'suppliers', 'clients', 'billing']
+        modulos: ['dashboard', 'pos', 'delivery', 'reservations', 'menu', 'kitchen', 'bar', 'inventory', 'purchases', 'warehouses', 'equipment', 'expenses', 'reminders', 'suppliers', 'clients', 'billing', 'descuentos']
     },
     {
         codigo: 'repartidor', nombre: 'Repartidor', base: 'mozo', alcance: 'sede', sistema: 0,
@@ -160,6 +164,14 @@ const iniciar = async () => {
             if (result.affectedRows > 0 && p.modulos.length > 0) {
                 await pool.query('INSERT IGNORE INTO perfil_modulos (perfil, modulo) VALUES ?', [p.modulos.map((m) => [p.codigo, m])]);
             }
+        }
+        // El permiso de descuentos es nuevo: se otorga una sola vez (si nadie lo tiene aun) a los perfiles que ya existian.
+        const [yaOtorgado] = await pool.query("SELECT 1 FROM perfil_modulos WHERE modulo = 'descuentos' LIMIT 1");
+        if (yaOtorgado.length === 0) {
+            await pool.query(
+                `INSERT IGNORE INTO perfil_modulos (perfil, modulo) SELECT codigo, 'descuentos' FROM perfiles WHERE codigo IN (?)`,
+                [PERFILES_CON_DESCUENTO]
+            );
         }
         await recargar();
         esquemaListo = true;

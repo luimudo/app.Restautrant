@@ -32,21 +32,26 @@ const BarPage = () => {
         e.dataTransfer.effectAllowed = "move";
     };
 
-    const onDrop = async (e, nuevoEstado) => {
-        const itemId = e.dataTransfer.getData("itemId");
+    // Cambia el estado de una bebida. Lo usan el arrastre (escritorio) y los botones (celular/tablet, donde no hay arrastre).
+    const moverItem = async (itemId, nuevoEstado) => {
         if (!itemId) return;
-        
         try {
-            await fetch(`/api/pedidos/detalle/${itemId}/estado`, {
+            const res = await fetch(`/api/pedidos/detalle/${itemId}/estado`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ estado: nuevoEstado })
             });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                alert(body.error || 'No se pudo cambiar el estado.');
+            }
             fetchPedidos();
         } catch (error) {
-            console.error('Error al soltar bebida:', error);
+            console.error('Error al mover bebida:', error);
         }
     };
+
+    const onDrop = (e, nuevoEstado) => moverItem(e.dataTransfer.getData("itemId"), nuevoEstado);
 
     const allowDrop = (e) => e.preventDefault();
 
@@ -74,7 +79,7 @@ const BarPage = () => {
             <div 
                 onDragOver={allowDrop} 
                 onDrop={(e) => onDrop(e, estado)}
-                className="flex-1 min-w-0 md:min-w-[300px] bg-blue-50/30 rounded-[2.5rem] p-6 border-2 border-dashed border-blue-100 flex flex-col h-full overflow-hidden"
+                className="flex-1 min-w-0 md:min-w-[300px] bg-blue-50/30 rounded-[2.5rem] p-6 border-2 border-dashed border-blue-100 flex flex-col md:h-full md:overflow-hidden"
             >
                 <div className="flex items-center justify-between mb-6 px-2 shrink-0">
                     <div className="flex items-center gap-3">
@@ -84,7 +89,7 @@ const BarPage = () => {
                     <span className="bg-white px-3 py-1 rounded-lg text-xs font-black shadow-sm border border-blue-50">{items.length}</span>
                 </div>
 
-                <div className="space-y-4 overflow-y-auto flex-1 pr-2 custom-scrollbar">
+                <div className="space-y-4 md:overflow-y-auto md:flex-1 pr-2 custom-scrollbar">
                     <AnimatePresence>
                         {items.map((item) => (
                             <motion.div
@@ -124,6 +129,14 @@ const BarPage = () => {
                                         )}
                                     </div>
                                 )}
+
+                                <button
+                                    type="button"
+                                    onClick={() => moverItem(item.detalle_id, estado === 'pendiente' ? 'despachado' : 'pendiente')}
+                                    className={`mt-4 w-full rounded-xl px-3 py-2.5 text-[11px] font-black uppercase tracking-widest active:opacity-80 ${estado === 'pendiente' ? 'bg-emerald-500 text-white' : 'border border-gray-200 bg-white text-gray-600'}`}
+                                >
+                                    {estado === 'pendiente' ? 'Despachar →' : '← Volver a recepción'}
+                                </button>
                             </motion.div>
                         ))}
                     </AnimatePresence>
@@ -145,11 +158,11 @@ const BarPage = () => {
     );
 
     return (
-        <div className="h-[calc(100vh-140px)] flex flex-col space-y-8 animate-fade-in">
-            <div className="flex justify-between items-end shrink-0">
+        <div className="md:h-[calc(100vh-140px)] flex flex-col space-y-6 md:space-y-8 animate-fade-in">
+            <div className="flex justify-between items-end shrink-0 gap-3">
                 <div>
-                    <h2 className="text-4xl font-display font-black tracking-tight uppercase">Monitor de <span className="text-blue-600">Barra</span></h2>
-                    <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Arrastra las bebidas para despacharlas.</p>
+                    <h2 className="text-2xl sm:text-4xl font-display font-black tracking-tight uppercase">Monitor de <span className="text-blue-600">Barra</span></h2>
+                    <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Arrastra las bebidas o usa el botón para despacharlas.</p>
                 </div>
                 <div className="flex gap-2 text-blue-600 font-black text-[10px] uppercase bg-blue-50 px-4 py-2 rounded-2xl border border-blue-100">
                     <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></div> Barra Operativa

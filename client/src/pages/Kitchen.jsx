@@ -31,21 +31,26 @@ const KitchenPage = () => {
         e.dataTransfer.setData("itemId", item.detalle_id);
     };
 
-    const onDrop = async (e, nuevoEstado) => {
-        const itemId = e.dataTransfer.getData("itemId");
+    // Cambia el estado de una linea. Lo usan el arrastre (escritorio) y los botones (celular/tablet, donde no hay arrastre).
+    const moverItem = async (itemId, nuevoEstado) => {
         if (!itemId) return;
-        
         try {
-            await fetch(`/api/pedidos/detalle/${itemId}/estado`, {
+            const res = await fetch(`/api/pedidos/detalle/${itemId}/estado`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ estado: nuevoEstado })
             });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                alert(body.error || 'No se pudo cambiar el estado.');
+            }
             fetchPedidos();
         } catch (error) {
-            console.error('Error al soltar item:', error);
+            console.error('Error al mover item:', error);
         }
     };
+
+    const onDrop = (e, nuevoEstado) => moverItem(e.dataTransfer.getData("itemId"), nuevoEstado);
 
     const allowDrop = (e) => e.preventDefault();
 
@@ -74,7 +79,7 @@ const KitchenPage = () => {
             <div 
                 onDragOver={allowDrop} 
                 onDrop={(e) => onDrop(e, estado)}
-                className="flex-1 min-w-0 lg:min-w-[300px] bg-gray-50/50 rounded-[2.5rem] p-6 border-2 border-dashed border-gray-200 flex flex-col h-full overflow-hidden"
+                className="flex-1 min-w-0 lg:min-w-[300px] bg-gray-50/50 rounded-[2.5rem] p-6 border-2 border-dashed border-gray-200 flex flex-col lg:h-full lg:overflow-hidden"
             >
                 <div className="flex items-center justify-between mb-6 px-2 shrink-0">
                     <div className="flex items-center gap-3">
@@ -84,7 +89,7 @@ const KitchenPage = () => {
                     <span className="bg-white px-3 py-1 rounded-lg text-xs font-black shadow-sm border border-gray-100">{items.length}</span>
                 </div>
 
-                <div className="space-y-4 overflow-y-auto flex-1 pr-2 custom-scrollbar">
+                <div className="space-y-4 lg:overflow-y-auto lg:flex-1 pr-2 custom-scrollbar">
                     <AnimatePresence>
                         {items.map((item) => (
                             <motion.div
@@ -125,6 +130,27 @@ const KitchenPage = () => {
                                         )}
                                     </div>
                                 )}
+
+                                <div className="mt-4 flex gap-2">
+                                    {estado !== 'pendiente' && (
+                                        <button
+                                            type="button"
+                                            onClick={() => moverItem(item.detalle_id, estado === 'listo' ? 'preparacion' : 'pendiente')}
+                                            className="flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-[11px] font-black uppercase tracking-widest text-gray-600 active:bg-gray-100"
+                                        >
+                                            ← {estado === 'listo' ? 'A preparación' : 'A recepción'}
+                                        </button>
+                                    )}
+                                    {estado !== 'listo' && (
+                                        <button
+                                            type="button"
+                                            onClick={() => moverItem(item.detalle_id, estado === 'pendiente' ? 'preparacion' : 'listo')}
+                                            className={`flex-1 rounded-xl px-3 py-2.5 text-[11px] font-black uppercase tracking-widest text-white active:opacity-80 ${estado === 'pendiente' ? 'bg-orange-500' : 'bg-emerald-500'}`}
+                                        >
+                                            {estado === 'pendiente' ? 'Preparar' : 'Listo'} →
+                                        </button>
+                                    )}
+                                </div>
                             </motion.div>
                         ))}
                     </AnimatePresence>
@@ -146,11 +172,11 @@ const KitchenPage = () => {
     );
 
     return (
-        <div className="h-[calc(100vh-140px)] flex flex-col space-y-8 animate-fade-in">
-            <div className="flex justify-between items-end shrink-0">
+        <div className="lg:h-[calc(100vh-140px)] flex flex-col space-y-6 lg:space-y-8 animate-fade-in">
+            <div className="flex justify-between items-end shrink-0 gap-3">
                 <div>
-                    <h2 className="text-4xl font-display font-black tracking-tight uppercase">Monitor de <span className="text-brand-600">Cocina</span></h2>
-                    <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Gestión visual por arrastre (Kanban).</p>
+                    <h2 className="text-2xl sm:text-4xl font-display font-black tracking-tight uppercase">Monitor de <span className="text-brand-600">Cocina</span></h2>
+                    <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Arrastra las tarjetas o usa los botones para cambiar su estado.</p>
                 </div>
                 <div className="flex gap-2">
                     <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-2xl border border-gray-100 shadow-sm text-[10px] font-black uppercase">

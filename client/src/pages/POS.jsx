@@ -2,11 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { ShoppingCart, Utensils, User, CheckCircle, XCircle, Plus, Minus, Search, ChevronLeft, Trash2, ArrowRight, LoaderCircle, Printer as PrinterIcon, Merge, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
+import { canAccessModule } from '../security/accessControl';
 import { imprimirPreCuenta } from '../utils/printDocs';
 import { Modal, Field, ErrorBox } from '../components/billing/billingShared';
 
+// Descuentos %: mismo calculo que el servidor (importe de carta de la linea x descuento por plato x descuento global).
+const pctDe = (valor) => Math.min(100, Math.max(0, Math.round((Number(valor) || 0) * 100) / 100));
+const importeLinea = (item, pctGlobal) =>
+    Math.round((Math.round(Number(item.precio) * 100) * Number(item.cantidad) / 100) * (1 - pctDe(item.descuento_pct) / 100) * (1 - pctDe(pctGlobal) / 100) * 100) / 100;
+
 const POS = () => {
     const { activeUser } = useAuth();
+    const puedeDescontar = canAccessModule(activeUser, 'descuentos');
+    const [descuentoGlobal, setDescuentoGlobal] = useState(''); // % de descuento sobre toda la cuenta ('' = sin descuento)
     const [mesas, setMesas] = useState([]);
     const [zonas, setZonas] = useState([]);
     const [productos, setProductos] = useState([]);
@@ -38,6 +46,7 @@ const POS = () => {
         } else {
             setCart([]);
             setActiveOrder(null);
+            setDescuentoGlobal('');
             setSaveError('');
         }
     }, [selectedMesa]);
@@ -53,6 +62,7 @@ const POS = () => {
             if (data && Array.isArray(data.detalles)) {
                 setSaveError('');
                 setActiveOrder(data);
+                setDescuentoGlobal(Number(data.descuento_global_pct) > 0 ? String(Number(data.descuento_global_pct)) : '');
                 const itemsForCart = data.detalles.map(d => ({
                     id: d.producto_id,
                     cart_key: `existing-${d.id}`,
@@ -64,12 +74,14 @@ const POS = () => {
                     isExisting: true,
                     estado_comanda: d.estado_comanda,
                     es_barra: d.es_barra,
-                    notas: d.notas || ''
+                    notas: d.notas || '',
+                    descuento_pct: Number(d.descuento_pct) > 0 ? String(Number(d.descuento_pct)) : ''
                 }));
                 setCart(itemsForCart);
             } else {
                 setCart([]);
                 setActiveOrder(null);
+                setDescuentoGlobal('');
                 setSaveError('');
             }
         } catch (error) {
@@ -141,7 +153,7 @@ const POS = () => {
         }
     };
 
-    const saveActiveOrder = async (nextCart) => {
+    const saveActiveOrder = async (nextCart, globalPct = descuentoGlobal) => {
         if (!activeOrder || nextCart.length === 0) return;
         setSavingOrder(true);
         setSaveError('');
@@ -150,11 +162,13 @@ const POS = () => {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    descuento_global_pct: pctDe(globalPct),
                     detalles: nextCart.map((item) => ({
                         ...(item.isExisting ? { detalle_id: item.detalle_id } : {}),
                         producto_id: item.id,
                         cantidad: Number(item.cantidad),
-                        notas: item.notas || ''
+                        notas: item.notas || '',
+                        descuento_pct: pctDe(item.descuento_pct)
                     }))
                 })
             });
@@ -180,7 +194,7 @@ const POS = () => {
                     estado_comanda: saved.estado_comanda
                 };
             }));
-            setActiveOrder((current) => current ? { ...current, total: result.total, detalles: savedDetails } : current);
+            setActiveOrder((current) => current ? { ...current, total: result.total, descuento_global_pct: result.descuento_global_pct, detalles: savedDetails } : current);
         } catch (error) {
             setSaveError(error.message || 'No se pudo actualizar la comanda.');
         } finally {
@@ -235,12 +249,26 @@ const POS = () => {
         if (activeOrder) saveActiveOrder(cart);
     };
 
-    const total = cart.reduce((acc, curr) => acc + (curr.precio * curr.cantidad), 0);
+    // Descuento % por plato: se escribe en el carrito y, en una comanda abierta, se guarda al salir del campo.
+    const updateDescuentoLinea = (cartKey, valor) => {
+        const limpio = valor === '' ? '' : String(Math.min(100, Math.max(0, Number(valor) || 0)));
+        setCart((current) => current.map((item) => ((item.uid || item.cart_key) === cartKey ? { ...item, descuento_pct: limpio } : item)));
+    };
+    const updateDescuentoGlobal = (valor) => {
+        setDescuentoGlobal(valor === '' ? '' : String(Math.min(100, Math.max(0, Number(valor) || 0))));
+    };
+
+    const globalPct = pctDe(descuentoGlobal);
+    const total = Math.round(cart.reduce((acc, curr) => acc + importeLinea(curr, globalPct), 0) * 100) / 100;
+    const totalLista = Math.round(cart.reduce((acc, curr) => acc + Math.round(Number(curr.precio) * 100) * Number(curr.cantidad) / 100, 0) * 100) / 100;
+    const hayDescuento = cart.some((item) => pctDe(item.descuento_pct) > 0) || globalPct > 0;
     const activeDetailsById = new Map((activeOrder?.detalles || []).map((item) => [Number(item.id), item]));
     const orderHasChanges = !activeOrder || cart.some((item) => !item.isExisting)
         || cart.filter((item) => item.isExisting).length !== (activeOrder.detalles || []).length
         || cart.some((item) => item.isExisting && Number(item.cantidad) !== Number(activeDetailsById.get(Number(item.detalle_id))?.cantidad))
-        || cart.some((item) => item.isExisting && (item.notas || '') !== (activeDetailsById.get(Number(item.detalle_id))?.notas || ''));
+        || cart.some((item) => item.isExisting && (item.notas || '') !== (activeDetailsById.get(Number(item.detalle_id))?.notas || ''))
+        || cart.some((item) => item.isExisting && pctDe(item.descuento_pct) !== pctDe(activeDetailsById.get(Number(item.detalle_id))?.descuento_pct))
+        || globalPct !== pctDe(activeOrder?.descuento_global_pct);
 
     const generatePreCuenta = async () => {
         if (!selectedMesa || cart.length === 0) return;
@@ -248,8 +276,9 @@ const POS = () => {
             await imprimirPreCuenta(selectedMesa.numero, cart.map((item, index) => ({
                 descripcion: String(item?.nombre ?? `Producto ${index + 1}`),
                 cantidad: Number(item?.cantidad) || 0,
-                precio: Number(item?.precio) || 0
-            })));
+                precio: Number(item?.precio) || 0,
+                descuento_pct: pctDe(item?.descuento_pct)
+            })), globalPct);
         } catch (error) {
             alert(error.message);
         }
@@ -275,19 +304,23 @@ const POS = () => {
             const method = activeOrder ? 'PUT' : 'POST';
 
             const orderPayload = activeOrder ? {
+                descuento_global_pct: globalPct,
                 detalles: cart.map(item => ({
                     ...(item.isExisting ? { detalle_id: item.detalle_id } : {}),
                     producto_id: item.id,
                     cantidad: Number(item.cantidad),
-                    notas: item.notas || ''
+                    notas: item.notas || '',
+                    descuento_pct: pctDe(item.descuento_pct)
                 }))
             } : {
                 mesa_id: selectedMesa.id,
                 usuario_id: Number(activeUser.id),
+                descuento_global_pct: globalPct,
                 detalles: cart.map(item => ({
                     producto_id: item.id,
                     cantidad: item.cantidad,
-                    notas: item.notas || ''
+                    notas: item.notas || '',
+                    descuento_pct: pctDe(item.descuento_pct)
                 }))
             };
 
@@ -343,12 +376,17 @@ const POS = () => {
                                         <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-[var(--text-muted)] border-l-4 border-brand-500 pl-3">{zona.nombre}</h3>
                                         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-6">
                                             {mesas.filter(m => m.zona_id === zona.id).map(mesa => {
-                                                const statusInfo = getStatusDisplay(mesa.ultimo_estado_pedido);
-                                                const isOcupada = mesa.estado === 'ocupada' || (mesa.ultimo_estado_pedido && !['entregado', 'pagado'].includes(mesa.ultimo_estado_pedido));
+                                                // Mesa de origen de un "Juntar mesas": su cuenta vive en la mesa destino.
+                                                const destinoUnion = !mesa.ultimo_estado_pedido && mesa.unida_a_mesa_id
+                                                    ? mesas.find((m) => Number(m.id) === Number(mesa.unida_a_mesa_id)) : null;
+                                                const estadoMostrado = destinoUnion ? destinoUnion.ultimo_estado_pedido : mesa.ultimo_estado_pedido;
+                                                const statusInfo = getStatusDisplay(estadoMostrado);
+                                                const isOcupada = Boolean(destinoUnion) || mesa.estado === 'ocupada' || (mesa.ultimo_estado_pedido && !['entregado', 'pagado'].includes(mesa.ultimo_estado_pedido));
                                                 return (
-                                                    <button key={mesa.id} disabled={savingOrder} onClick={() => setSelectedMesa(mesa)} className={`card p-6 flex flex-col items-center gap-4 disabled:opacity-50 ${isOcupada ? 'bg-red-50/30' : ''}`}>
+                                                    <button key={mesa.id} disabled={savingOrder} onClick={() => setSelectedMesa(destinoUnion || mesa)} className={`card p-6 flex flex-col items-center gap-4 disabled:opacity-50 ${isOcupada ? 'bg-red-50/30' : ''}`}>
                                                         <Utensils size={32} className={isOcupada ? 'text-red-600' : 'text-brand-600'} />
                                                         <span className="text-xl font-display font-black">Mesa {mesa.numero}</span>
+                                                        {destinoUnion && <span className="text-[10px] font-black uppercase text-brand-600">Unida a Mesa {destinoUnion.numero}</span>}
                                                         {statusInfo && <span className={`text-[10px] font-black uppercase ${statusInfo.text}`}>{statusInfo.label}</span>}
                                                     </button>
                                                 );
@@ -481,8 +519,33 @@ const POS = () => {
                                         <p className="min-w-14 text-center text-xs font-bold">Cant: {item.cantidad}</p>
                                         <button disabled={savingOrder} onClick={() => updateCantidad(item.cart_key, 1)} aria-label={`Aumentar ${item.nombre}`} className="rounded-md border border-gray-200 bg-white p-1.5 text-gray-600 hover:border-brand-300 disabled:opacity-40"><Plus size={12} /></button>
                                     </div>
-                                    <p className="font-black">S/ {(item.cantidad * item.precio).toFixed(2)}</p>
+                                    <div className="text-right leading-tight">
+                                        {importeLinea(item, globalPct) < Math.round(Number(item.precio) * 100) * Number(item.cantidad) / 100 && (
+                                            <p className="text-[10px] font-bold text-gray-400 line-through">S/ {(Math.round(Number(item.precio) * 100) * Number(item.cantidad) / 100).toFixed(2)}</p>
+                                        )}
+                                        <p className="font-black">S/ {importeLinea(item, globalPct).toFixed(2)}</p>
+                                    </div>
                                 </div>
+                                {(puedeDescontar || pctDe(item.descuento_pct) > 0) && (
+                                    <label className="mt-2 flex items-center gap-2 text-[11px] font-bold text-gray-500">
+                                        Descuento
+                                        <input
+                                            type="number"
+                                            inputMode="decimal"
+                                            min="0"
+                                            max="100"
+                                            step="0.01"
+                                            value={item.descuento_pct ?? ''}
+                                            disabled={!puedeDescontar}
+                                            onChange={(event) => updateDescuentoLinea(item.uid || item.cart_key, event.target.value)}
+                                            onBlur={guardarNota}
+                                            placeholder="0"
+                                            aria-label={`Descuento de ${item.nombre} en porcentaje`}
+                                            className="input w-20 py-1.5 text-xs text-right disabled:opacity-60"
+                                        />
+                                        %
+                                    </label>
+                                )}
                                 {(item.notas || notasAbiertas[item.uid || item.cart_key]) ? (
                                     <div className="mt-3 flex items-start gap-2">
                                         <MessageSquare size={14} className="mt-2.5 shrink-0 text-brand-600" aria-hidden="true" />
@@ -513,6 +576,40 @@ const POS = () => {
                     </div>
 
                     <div className="p-6 border-t bg-gray-50 space-y-3">
+                        {(puedeDescontar || globalPct > 0) && (
+                            <label className="flex items-center justify-between gap-3 text-xs font-bold text-gray-600">
+                                Descuento global de la cuenta
+                                <span className="flex items-center gap-1.5">
+                                    <input
+                                        type="number"
+                                        inputMode="decimal"
+                                        min="0"
+                                        max="100"
+                                        step="0.01"
+                                        value={descuentoGlobal}
+                                        disabled={!puedeDescontar || savingOrder}
+                                        onChange={(event) => updateDescuentoGlobal(event.target.value)}
+                                        onBlur={() => { if (activeOrder) saveActiveOrder(cart); }}
+                                        placeholder="0"
+                                        aria-label="Descuento global en porcentaje"
+                                        className="input w-20 py-1.5 text-xs text-right disabled:opacity-60"
+                                    />
+                                    %
+                                </span>
+                            </label>
+                        )}
+                        {hayDescuento && (
+                            <div className="flex justify-between text-xs font-bold text-gray-500">
+                                <span>Subtotal sin descuento</span>
+                                <span>S/ {totalLista.toFixed(2)}</span>
+                            </div>
+                        )}
+                        {hayDescuento && (
+                            <div className="flex justify-between text-xs font-bold text-emerald-700">
+                                <span>Descuento total</span>
+                                <span>- S/ {(totalLista - total).toFixed(2)}</span>
+                            </div>
+                        )}
                         <div className="flex justify-between items-center mb-2">
                             <span className="font-bold text-lg">Total</span>
                             <span className="font-black text-2xl text-brand-600">S/ {total.toFixed(2)}</span>
@@ -606,7 +703,10 @@ const JuntarMesasModal = ({ mesas, tieneComanda, onClose, onDone }) => {
                 <Field label="Mesa de destino (queda con la cuenta)">
                     <select className="input" value={destinoId} onChange={(e) => { setDestinoId(e.target.value); setOrigenIds((prev) => prev.filter((id) => String(id) !== e.target.value)); }} required>
                         <option value="">Seleccione...</option>
-                        {ordenadas.map((m) => <option key={m.id} value={m.id}>Mesa {m.numero}{m.zona_nombre ? ` · ${m.zona_nombre}` : ''}{tieneComanda(m) ? ' · con comanda' : ' · libre'}</option>)}
+                        {ordenadas.map((m) => {
+                            const unida = !m.ultimo_estado_pedido && Boolean(m.unida_a_mesa_id);
+                            return <option key={m.id} value={m.id} disabled={unida}>Mesa {m.numero}{m.zona_nombre ? ` · ${m.zona_nombre}` : ''}{tieneComanda(m) ? ' · con comanda' : unida ? ' · unida a otra mesa' : ' · libre'}</option>;
+                        })}
                     </select>
                 </Field>
                 <div className="space-y-2">

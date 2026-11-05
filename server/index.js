@@ -1354,7 +1354,18 @@ app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
                   )
                 ORDER BY p2.fecha_creacion DESC
                 LIMIT 1
-            ) as ultimo_estado_pedido
+            ) as ultimo_estado_pedido,
+            (
+                SELECT pb.mesa_id
+                FROM pedidos po
+                JOIN pedidos pb ON pb.id = po.unido_a_pedido_id
+                WHERE po.mesa_id = m.id
+                  AND po.estado = 'cancelado'
+                  AND pb.estado NOT IN ('pagado', 'cancelado')
+                  AND pb.mesa_id <> m.id
+                ORDER BY po.id DESC
+                LIMIT 1
+            ) as unida_a_mesa_id
             FROM mesas m
             LEFT JOIN zonas z ON m.zona_id = z.id
             WHERE m.sede_id = ?
@@ -2263,10 +2274,47 @@ app.delete('/api/productos/:id', allowAdminKitchenForWrites, async (req, res) =>
 // Observacion opcional de un plato ("sin cebolla", "punto medio"): texto corto, la cocina la ve con un boton.
 const notaPlato = (valor) => String(valor ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
 
+// Descuentos %: uno por plato (detalles_pedido.descuento_pct) y uno global de la cuenta (pedidos.descuento_global_pct).
+// detalles_pedido.precio_unitario es el precio de carta y detalles_pedido.subtotal el importe NETO de la linea (con ambos
+// descuentos), asi pedidos.total = SUM(subtotal) sigue valiendo en todas las pantallas y el comprobante usa el mismo importe.
+let tieneDescuentos = false;
+const parsePct = (valor) => {
+    if (valor === undefined || valor === null || valor === '') return 0;
+    const n = Math.round(Number(valor) * 100) / 100;
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw Object.assign(new Error('El descuento debe estar entre 0 y 100 %.'), { status: 400 });
+    return n;
+};
+const montoNeto = (precio, cantidad, pctLinea, pctGlobal) =>
+    Math.round((Math.round(Number(precio) * 100) * Number(cantidad) / 100) * (1 - pctLinea / 100) * (1 - pctGlobal / 100) * 100) / 100;
+const puedeDescontar = (req) => req.userContext?.perfil === permisos.SUPERADMIN || Boolean(req.userContext?.modulos?.has('descuentos'));
+const exigirPermisoDescuento = (req) => {
+    if (!puedeDescontar(req)) throw Object.assign(new Error('Su perfil no tiene permiso para aplicar descuentos.'), { status: 403 });
+};
+
+/** Recalcula el importe neto de cada linea y el total de una comanda con sus descuentos vigentes. */
+const recalcularPedido = async (connection, pedidoId) => {
+    const [[pedido]] = await connection.query(
+        `SELECT ${tieneDescuentos ? 'descuento_global_pct' : '0 AS descuento_global_pct'} FROM pedidos WHERE id = ?`, [pedidoId]
+    );
+    const global = Number(pedido?.descuento_global_pct) || 0;
+    const [lineas] = await connection.query(
+        `SELECT id, cantidad, precio_unitario, ${tieneDescuentos ? 'descuento_pct' : '0 AS descuento_pct'} FROM detalles_pedido WHERE pedido_id = ?`, [pedidoId]
+    );
+    let total = 0;
+    for (const linea of lineas) {
+        const neto = montoNeto(linea.precio_unitario, linea.cantidad, Number(linea.descuento_pct) || 0, global);
+        total += neto;
+        await connection.query('UPDATE detalles_pedido SET subtotal = ? WHERE id = ?', [neto, linea.id]);
+    }
+    total = Math.round(total * 100) / 100;
+    await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, pedidoId]);
+    return total;
+};
+
 app.get('/api/pedidos/mesa/:mesaId/activo', allowAdminWaiterCashier, requireSede, async (req, res) => {
     try {
         const [pedidos] = await pool.query(`
-            SELECT id, estado, total
+            SELECT id, estado, total${tieneDescuentos ? ', descuento_global_pct' : ''}
             FROM pedidos
             WHERE mesa_id = ?
               AND sede_id = ?
@@ -2548,27 +2596,36 @@ app.post('/api/pedidos', allowAdminOrWaiter, requireSede, async (req, res) => {
             return res.status(400).json({ error: 'La mesa no pertenece a esta sede' });
         }
 
+        // Descuentos: solo con permiso; sin columnas en la base se ignoran.
+        const descuentoGlobal = parsePct(req.body.descuento_global_pct);
+        const descuentosLinea = detalles.map((item) => parsePct(item.descuento_pct));
+        if (descuentoGlobal > 0 || descuentosLinea.some((pct) => pct > 0)) {
+            exigirPermisoDescuento(req);
+            if (!tieneDescuentos) throw Object.assign(new Error('Los descuentos aun no estan disponibles: reinicie el servidor.'), { status: 409 });
+        }
+
         // Create Header
         const [orderResult] = await connection.query(
-            'INSERT INTO pedidos (sede_id, mesa_id, cliente_id, usuario_id, estado) VALUES (?, ?, ?, ?, ?)',
-            [sedeId, mesa_id, cliente_id, usuario_id, 'pendiente']
+            `INSERT INTO pedidos (sede_id, mesa_id, cliente_id, usuario_id, estado${tieneDescuentos ? ', descuento_global_pct' : ''}) VALUES (?, ?, ?, ?, ?${tieneDescuentos ? ', ?' : ''})`,
+            [sedeId, mesa_id, cliente_id, usuario_id, 'pendiente', ...(tieneDescuentos ? [descuentoGlobal] : [])]
         );
         const pedidoId = orderResult.insertId;
 
         // Create Details
         let total = 0;
-        for (const item of detalles) {
+        for (const [index, item] of detalles.entries()) {
             // Get product price
             const [prodRows] = await connection.query('SELECT precio FROM productos WHERE id = ?', [item.producto_id]);
             const precio = prodRows[0].precio;
-            const subtotal = precio * item.cantidad;
+            const subtotal = montoNeto(precio, item.cantidad, descuentosLinea[index], descuentoGlobal);
             total += subtotal;
 
             await connection.query(
-                'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, notaPlato(item.notas)]
+                `INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas${tieneDescuentos ? ', descuento_pct' : ''}) VALUES (?, ?, ?, ?, ?, ?${tieneDescuentos ? ', ?' : ''})`,
+                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, notaPlato(item.notas), ...(tieneDescuentos ? [descuentosLinea[index]] : [])]
             );
         }
+        total = Math.round(total * 100) / 100;
 
         // Update Total
         await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, pedidoId]);
@@ -2578,7 +2635,7 @@ app.post('/api/pedidos', allowAdminOrWaiter, requireSede, async (req, res) => {
 
     } catch (err) {
         await connection.rollback();
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
     } finally {
         connection.release();
     }
@@ -2603,7 +2660,7 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
     try {
         await connection.beginTransaction();
         const [orders] = await connection.query(
-            'SELECT id, estado FROM pedidos WHERE id = ? AND sede_id = ? LIMIT 1 FOR UPDATE',
+            `SELECT id, estado${tieneDescuentos ? ', descuento_global_pct' : ''} FROM pedidos WHERE id = ? AND sede_id = ? LIMIT 1 FOR UPDATE`,
             [req.params.id, sedeOf(req)]
         );
         const order = orders[0];
@@ -2622,12 +2679,23 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
         }
 
         const [currentRows] = await connection.query(
-            'SELECT id, producto_id, precio_unitario FROM detalles_pedido WHERE pedido_id = ? ORDER BY id FOR UPDATE',
+            `SELECT id, producto_id, precio_unitario${tieneDescuentos ? ', descuento_pct' : ''} FROM detalles_pedido WHERE pedido_id = ? ORDER BY id FOR UPDATE`,
             [order.id]
         );
         const currentById = new Map(currentRows.map((row) => [Number(row.id), row]));
         const seenDetailIds = new Set();
         const normalizedItems = [];
+
+        // Descuentos: si no se envian se conservan; cambiarlos exige el permiso (lo que ya estaba guardado no lo exige).
+        const globalActual = Number(order.descuento_global_pct) || 0;
+        const globalNuevo = req.body.descuento_global_pct === undefined ? globalActual : parsePct(req.body.descuento_global_pct);
+        let cambiaDescuento = globalNuevo !== globalActual;
+        const pctDe = (item, anterior) => {
+            const pct = item.descuento_pct === undefined ? anterior : parsePct(item.descuento_pct);
+            if (pct !== anterior) cambiaDescuento = true;
+            return pct;
+        };
+
         for (const item of detalles) {
             const detailId = item.detalle_id == null ? null : Number(item.detalle_id);
             const productId = Number(item.producto_id);
@@ -2638,25 +2706,29 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
                     throw Object.assign(new Error('Una de las lineas ya no corresponde a esta comanda. Recarga e intenta nuevamente.'), { status: 409 });
                 }
                 seenDetailIds.add(detailId);
-                normalizedItems.push({ detailId, productId, quantity, price: Number(existing.precio_unitario), notas: typeof item.notas === 'string' ? notaPlato(item.notas) : null });
+                normalizedItems.push({ detailId, productId, quantity, price: Number(existing.precio_unitario), pct: pctDe(item, Number(existing.descuento_pct) || 0), notas: typeof item.notas === 'string' ? notaPlato(item.notas) : null });
             } else {
                 const [products] = await connection.query('SELECT precio FROM productos WHERE id = ? AND disponible = 1 LIMIT 1', [productId]);
                 if (!products.length) throw Object.assign(new Error('Uno de los productos agregados ya no esta disponible.'), { status: 409 });
-                normalizedItems.push({ detailId: null, productId, quantity, price: Number(products[0].precio), notas: notaPlato(item.notas) });
+                normalizedItems.push({ detailId: null, productId, quantity, price: Number(products[0].precio), pct: pctDe(item, 0), notas: notaPlato(item.notas) });
             }
+        }
+        if (cambiaDescuento) {
+            exigirPermisoDescuento(req);
+            if (!tieneDescuentos) throw Object.assign(new Error('Los descuentos aun no estan disponibles: reinicie el servidor.'), { status: 409 });
         }
 
         for (const item of normalizedItems) {
-            const subtotal = Math.round(item.price * 100) * item.quantity / 100;
+            const subtotal = montoNeto(item.price, item.quantity, item.pct, globalNuevo);
             if (item.detailId !== null) {
                 await connection.query(
-                    'UPDATE detalles_pedido SET cantidad = ?, subtotal = ?, notas = COALESCE(?, notas) WHERE id = ? AND pedido_id = ?',
-                    [item.quantity, subtotal, item.notas, item.detailId, order.id]
+                    `UPDATE detalles_pedido SET cantidad = ?, subtotal = ?, notas = COALESCE(?, notas)${tieneDescuentos ? ', descuento_pct = ?' : ''} WHERE id = ? AND pedido_id = ?`,
+                    [item.quantity, subtotal, item.notas, ...(tieneDescuentos ? [item.pct] : []), item.detailId, order.id]
                 );
             } else {
                 await connection.query(
-                    'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                    [order.id, item.productId, item.quantity, item.price, subtotal, item.notas || '']
+                    `INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas${tieneDescuentos ? ', descuento_pct' : ''}) VALUES (?, ?, ?, ?, ?, ?${tieneDescuentos ? ', ?' : ''})`,
+                    [order.id, item.productId, item.quantity, item.price, subtotal, item.notas || '', ...(tieneDescuentos ? [item.pct] : [])]
                 );
             }
         }
@@ -2666,16 +2738,16 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
         }
         const [totals] = await connection.query('SELECT COALESCE(SUM(subtotal), 0) AS total FROM detalles_pedido WHERE pedido_id = ?', [order.id]);
         const total = Number(totals[0]?.total || 0);
-        await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, order.id]);
+        await connection.query(`UPDATE pedidos SET total = ?${tieneDescuentos ? ', descuento_global_pct = ?' : ''} WHERE id = ?`, [total, ...(tieneDescuentos ? [globalNuevo] : []), order.id]);
         const [savedRows] = await connection.query(
             `SELECT dp.id, dp.id AS detalle_id, dp.producto_id, dp.cantidad, dp.precio_unitario, dp.subtotal, dp.notas,
-                    p.nombre AS producto_nombre, dp.estado_comanda
+                    ${tieneDescuentos ? 'dp.descuento_pct,' : ''} p.nombre AS producto_nombre, dp.estado_comanda
              FROM detalles_pedido dp JOIN productos p ON p.id = dp.producto_id
              WHERE dp.pedido_id = ? ORDER BY dp.id`,
             [order.id]
         );
         await connection.commit();
-        res.json({ id: Number(order.id), total, detalles: savedRows });
+        res.json({ id: Number(order.id), total, descuento_global_pct: globalNuevo, detalles: savedRows });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -2698,21 +2770,19 @@ app.put('/api/pedidos/:id/items', allowAdminOrWaiter, requireSede, async (req, r
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        let totalAdicional = 0;
         for (const item of detalles) {
             const [prodRows] = await connection.query('SELECT precio FROM productos WHERE id = ?', [item.producto_id]);
             const precio = prodRows[0].precio;
-            const subtotal = precio * item.cantidad;
-            totalAdicional += subtotal;
 
             await connection.query(
                 'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, notaPlato(item.notas)]
+                [pedidoId, item.producto_id, item.cantidad, precio, precio * item.cantidad, notaPlato(item.notas)]
             );
         }
 
-        // Update Total
-        await connection.query('UPDATE pedidos SET total = total + ?, estado = ? WHERE id = ?', [totalAdicional, 'pendiente', pedidoId]);
+        // Update Total (con los descuentos vigentes de la comanda)
+        await recalcularPedido(connection, pedidoId);
+        await connection.query('UPDATE pedidos SET estado = ? WHERE id = ?', ['pendiente', pedidoId]);
 
         await connection.commit();
         res.json({ message: 'Items añadidos al pedido' });
@@ -2776,8 +2846,9 @@ app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (re
         }
 
         // The merged order shows the least advanced state of its lines.
-        const [lineas] = await connection.query('SELECT estado_comanda, subtotal FROM detalles_pedido WHERE pedido_id = ?', [base.id]);
-        const total = round2(lineas.reduce((acc, l) => acc + Number(l.subtotal), 0));
+        // Cada plato conserva su descuento; el descuento global que rige es el de la comanda base (la de la mesa destino).
+        const total = await recalcularPedido(connection, base.id);
+        const [lineas] = await connection.query('SELECT estado_comanda FROM detalles_pedido WHERE pedido_id = ?', [base.id]);
         const estado = lineas.some((l) => l.estado_comanda === 'pendiente') ? 'pendiente'
             : lineas.some((l) => l.estado_comanda === 'en_cocina') ? 'en_proceso' : 'listo';
         await connection.query('UPDATE pedidos SET total = ?, estado = ? WHERE id = ?', [total, estado, base.id]);
@@ -2996,7 +3067,7 @@ const facturaItems = async (facturaId) => {
     if (!row) return [];
     if (row.items_snapshot) return typeof row.items_snapshot === 'string' ? JSON.parse(row.items_snapshot) : row.items_snapshot;
     const [detalles] = await pool.query(
-        `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, um.codigo_sunat AS unidad_sunat
+        `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, dp.subtotal AS total_neto, um.codigo_sunat AS unidad_sunat
          FROM detalles_pedido dp
          LEFT JOIN productos pr ON pr.id = dp.producto_id
          LEFT JOIN unidades_medida um ON um.id = pr.unidad_id
@@ -3012,18 +3083,25 @@ const calcularLineas = (detalles, tasa) => {
     const items = detalles.map((d) => {
         const cantidad = Number(d.cantidad);
         const precio = Number(d.precio_unitario);
-        const total = round2(cantidad * precio);
+        const lista = round2(cantidad * precio);
+        // Una linea con descuento trae su importe neto (total_neto): ese es el total cobrado. precio_unitario pasa a ser el
+        // precio neto por unidad (asi una nota de credito por item devuelve lo realmente cobrado) y se guarda el de lista.
+        const neto = d.total_neto !== undefined && d.total_neto !== null ? round2(d.total_neto) : lista;
+        const conDescuento = neto < lista;
+        const total = conDescuento ? neto : lista;
         const subtotal = round2(total / factor);
+        const precioNeto = conDescuento && cantidad > 0 ? Math.round((neto / cantidad) * 1e4) / 1e4 : precio;
         return {
             producto_id: d.producto_id,
             descripcion: String(d.descripcion || `Producto ${d.producto_id}`).slice(0, 250),
             unidad_sunat: d.unidad_sunat || 'NIU',
             cantidad,
-            precio_unitario: precio,
-            valor_unitario: Math.round((precio / factor) * 1e10) / 1e10,
+            precio_unitario: precioNeto,
+            valor_unitario: Math.round((precioNeto / factor) * 1e10) / 1e10,
             subtotal,
             igv: round2(total - subtotal),
-            total
+            total,
+            ...(conDescuento ? { precio_lista: precio, descuento: round2((lista - neto) / factor) } : {})
         };
     });
     const total = round2(items.reduce((sum, item) => sum + item.total, 0));
@@ -3035,6 +3113,8 @@ const calcularLineas = (detalles, tasa) => {
         const mayor = items.reduce((max, item) => (item.total > max.total ? item : max), items[0]);
         mayor.subtotal = round2(mayor.subtotal + ajuste);
         mayor.igv = round2(mayor.total - mayor.subtotal);
+        // Con descuento, valor x cantidad - descuento = subtotal: el descuento absorbe la misma diferencia.
+        if (mayor.descuento) mayor.descuento = round2(mayor.descuento - ajuste);
     }
     return { items, gravada, igv: round2(total - gravada), total };
 };
@@ -3072,9 +3152,10 @@ const buildComprobantePayload = ({ tipo, serie, numero, cliente, fecha, condicio
             codigo: codigoLinea(item),
             descripcion: item.descripcion,
             cantidad: item.cantidad,
-            valor_unitario: item.valor_unitario,
-            precio_unitario: item.precio_unitario,
-            descuento: '',
+            // Con descuento se declara el precio de lista y el descuento (sin IGV): valor x cantidad - descuento = subtotal.
+            valor_unitario: item.descuento ? Math.round((item.precio_lista / (1 + tasa / 100)) * 1e10) / 1e10 : item.valor_unitario,
+            precio_unitario: item.descuento ? item.precio_lista : item.precio_unitario,
+            descuento: item.descuento || '',
             subtotal: item.subtotal,
             tipo_de_igv: 1,
             igv: item.igv,
@@ -3407,7 +3488,7 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
         if (order.estado === 'cancelado') throw new FacturacionError(409, 'No se puede facturar un pedido cancelado');
 
         const [detalles] = await connection.query(
-            `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, um.codigo_sunat AS unidad_sunat
+            `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, dp.subtotal AS total_neto, um.codigo_sunat AS unidad_sunat
              FROM detalles_pedido dp
              LEFT JOIN productos pr ON pr.id = dp.producto_id
              LEFT JOIN unidades_medida um ON um.id = pr.unidad_id
@@ -4007,9 +4088,18 @@ app.post('/api/facturas/:id/notas', allowAdmin, async (req, res) => {
 app.post('/api/precuenta/ticket', allowAdminWaiterCashier, requireSede, async (req, res) => {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const clean = items
-        .map((item) => ({ descripcion: String(item?.descripcion || '').slice(0, 120), cantidad: Number(item?.cantidad), precio: Number(item?.precio) }))
+        .map((item) => {
+            const cantidad = Number(item?.cantidad);
+            const precio = Number(item?.precio);
+            const pct = Number(item?.descuento_pct) > 0 && Number(item.descuento_pct) <= 100 ? Number(item.descuento_pct) : 0;
+            return { descripcion: String(item?.descripcion || '').slice(0, 120), cantidad, precio, descuento_pct: pct };
+        })
         .filter((item) => item.descripcion && item.cantidad > 0 && item.precio >= 0);
     if (clean.length === 0) return res.status(400).json({ error: 'La pre-cuenta no tiene productos' });
+    // El importe de cada linea sale del mismo calculo que la comanda (descuento por plato y global).
+    let globalPct = 0;
+    try { globalPct = parsePct(req.body?.descuento_global_pct); } catch { globalPct = 0; }
+    for (const item of clean) item.importe = montoNeto(item.precio, item.cantidad, item.descuento_pct, globalPct);
     try {
         const config = await getEmpresaConfig();
         const [sedeRows] = await pool.query('SELECT direccion FROM sedes WHERE id = ?', [sedeOf(req)]);
@@ -4017,7 +4107,8 @@ app.post('/api/precuenta/ticket', allowAdminWaiterCashier, requireSede, async (r
         const html = formatos.preCuentaHtml({
             mesa: String(req.body?.mesa || '-').slice(0, 20),
             items: clean,
-            total: round2(clean.reduce((sum, item) => sum + item.cantidad * item.precio, 0)),
+            total: round2(clean.reduce((sum, item) => sum + item.importe, 0)),
+            descuento_global_pct: globalPct,
             fecha: now[0].fecha,
             hora: now[0].hora,
             mozo: req.userContext.nombre
@@ -7976,9 +8067,30 @@ const asegurarStockDecimal = async () => {
     tieneCostoProducto = true;
 };
 
+// Descuento % por plato (detalles_pedido) y global (pedidos). Idempotente; hasta que existan las columnas el POS funciona sin descuentos.
+const asegurarDescuentos = async () => {
+    const falta = async (tabla, columna) => {
+        const [rows] = await pool.query(
+            'SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+            [tabla, columna]
+        );
+        return rows.length === 0;
+    };
+    if (await falta('detalles_pedido', 'descuento_pct')) {
+        await pool.query('ALTER TABLE detalles_pedido ADD COLUMN descuento_pct DECIMAL(5,2) NOT NULL DEFAULT 0');
+        console.log('detalles_pedido.descuento_pct agregado');
+    }
+    if (await falta('pedidos', 'descuento_global_pct')) {
+        await pool.query('ALTER TABLE pedidos ADD COLUMN descuento_global_pct DECIMAL(5,2) NOT NULL DEFAULT 0');
+        console.log('pedidos.descuento_global_pct agregado');
+    }
+    tieneDescuentos = true;
+};
+
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     permisos.iniciar();
+    asegurarDescuentos().catch((err) => console.error('No se pudieron preparar las columnas de descuento:', err.message));
     asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();

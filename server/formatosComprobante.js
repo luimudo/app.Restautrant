@@ -335,9 +335,14 @@ async function ticketHtml(data, empresaSource) {
 }
 
 /** Pre-cuenta (account preview) for the table: same 80 mm look, clearly not a payment receipt. */
-function preCuentaHtml({ mesa, items, total, fecha, hora, mozo }, empresaSource) {
+function preCuentaHtml({ mesa, items, total, fecha, hora, mozo, descuento_global_pct: descuentoGlobal }, empresaSource) {
     const co = empresaDe(empresaSource);
-    const rows = items.map((item) => `<tr><td class="qty">${num(item.cantidad)}</td><td class="desc">${escapeHtml(item.descripcion)}</td><td class="amount">${(num(item.cantidad) * num(item.precio)).toFixed(2)}</td></tr>`).join('');
+    const rows = items.map((item) => {
+        const importe = item.importe !== undefined ? num(item.importe) : num(item.cantidad) * num(item.precio);
+        const dto = num(item.descuento_pct) > 0 ? `<div class="small">Dto. ${num(item.descuento_pct)}%</div>` : '';
+        return `<tr><td class="qty">${num(item.cantidad)}</td><td class="desc">${escapeHtml(item.descripcion)}${dto}</td><td class="amount">${importe.toFixed(2)}</td></tr>`;
+    }).join('');
+    const dtoGlobal = num(descuentoGlobal) > 0 ? `<div class="row small"><span>Incluye descuento global de ${num(descuentoGlobal)}%</span><span></span></div>` : '';
     return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>PreCuenta_Mesa_${escapeHtml(mesa)}</title>
 <style>
@@ -357,6 +362,7 @@ function preCuentaHtml({ mesa, items, total, fecha, hora, mozo }, empresaSource)
  <div class="sep"></div>
  <table><thead><tr><th>CANT</th><th>DESCRIPCION</th><th class="amount">IMPORTE</th></tr></thead><tbody>${rows}</tbody></table>
  <div class="sep"></div>
+ ${dtoGlobal}
  <div class="row total"><span>TOTAL A PAGAR:</span><span>${money(total)}</span></div>
  <div class="sep"></div>
  <div class="center small">ESTE DOCUMENTO NO ES UN COMPROBANTE DE PAGO</div>
