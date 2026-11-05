@@ -164,7 +164,9 @@ async function pdfA4(data, empresaSource) {
     doc.save();
     doc.font('Helvetica').fontSize(8).fillColor(...COLORS.text);
     for (const item of data.items) {
-        const descripcion = safeText(item.descripcion) || 'ITEM';
+        const dtoItem = descuentoLinea(item);
+        const descripcion = (safeText(item.descripcion) || 'ITEM') + (dtoItem > 0 ? `
+(Precio lista ${num(item.precio_lista).toFixed(2)} - Descuento ${dtoItem.toFixed(2)})` : '');
         const h = Math.max(16, doc.heightOfString(descripcion, { width: col.desc - 8 }) + 8);
         y = ensureSpace(doc, y, h + 1);
         drawRect(doc, MARGIN, y, tableW, h, null, COLORS.lightBorder);
@@ -185,7 +187,7 @@ async function pdfA4(data, empresaSource) {
     const rightW = PAGE_W - MARGIN * 2 - leftW - 6;
     const rightX = MARGIN + leftW + 6;
     const rows = data.electronico
-        ? [['Op. Gravada', money(data.gravada)], ['Op. Exonerada', money(0)], ['Op. Inafecta', money(0)], ['Descuentos', money(0)],
+        ? [['Op. Gravada', money(data.gravada)], ['Op. Exonerada', money(0)], ['Op. Inafecta', money(0)], ['Descuentos', money(descuentoTotal(data.items))],
             [`IGV (${num(data.igv_porcentaje)}%)`, money(data.igv)], ['ICBPER', money(0)], ['Importe Total', money(data.total)]]
         : [['Sub Total', money(data.gravada)], [`IGV (${num(data.igv_porcentaje)}%)`, money(data.igv)], ['Importe Total', money(data.total)]];
     const rightH = rows.length * 12 + 14;
@@ -275,12 +277,24 @@ async function pdfA4(data, empresaSource) {
     return { buffer: await done, filename: nombreArchivo(data, 'pdf') };
 }
 
+/** Descuento (con IGV) de una linea: importe a precio de lista menos lo cobrado. 0 si la linea no tiene descuento. */
+const descuentoLinea = (item) => (num(item.precio_lista) > 0 ? Math.max(0, Math.round((num(item.precio_lista) * num(item.cantidad) - num(item.total)) * 100) / 100) : 0);
+const descuentoTotal = (items) => Math.round(items.reduce((sum, item) => sum + descuentoLinea(item), 0) * 100) / 100;
+
 async function ticketHtml(data, empresaSource) {
     const co = empresaDe(empresaSource);
     const titulo = { boleta: 'BOLETA DE VENTA ELECT.', nota_credito: 'NOTA DE CREDITO ELECT.', nota_debito: 'NOTA DE DEBITO ELECT.' }[data.tipo] || TITULOS[data.tipo] || 'COMPROBANTE';
     const qr = cadenaQr(data, co);
     const qrImg = qr ? await QRCode.toDataURL(qr, { width: 120, margin: 1, errorCorrectionLevel: 'M' }) : '';
-    const rows = data.items.map((item) => `<tr><td class="qty">${num(item.cantidad)}</td><td class="desc">${escapeHtml(item.descripcion)}</td><td class="amount">${num(item.total).toFixed(2)}</td></tr>`).join('');
+    const rows = data.items.map((item) => {
+        const dto = descuentoLinea(item);
+        const detalleDto = dto > 0 ? `<div class="small">P. lista ${num(item.precio_lista).toFixed(2)} - Dto. ${dto.toFixed(2)}</div>` : '';
+        return `<tr><td class="qty">${num(item.cantidad)}</td><td class="desc">${escapeHtml(item.descripcion)}${detalleDto}</td><td class="amount">${num(item.total).toFixed(2)}</td></tr>`;
+    }).join('');
+    const dtoTotal = descuentoTotal(data.items);
+    const bloqueDescuento = dtoTotal > 0
+        ? `<div class="row"><span>IMPORTE SIN DESCUENTO:</span><span>${money(num(data.total) + dtoTotal)}</span></div><div class="row"><span>DESCUENTO:</span><span>-${money(dtoTotal)}</span></div>`
+        : '';
     const pie = data.electronico ? `
  <div class="sep"></div>
  <div class="center tiny">Representación impresa de la ${escapeHtml(TITULOS[data.tipo])}<br>Consulte en www.sunat.gob.pe</div>
@@ -323,6 +337,7 @@ async function ticketHtml(data, empresaSource) {
  <div class="sep"></div>
  <table><thead><tr><th>CANT</th><th>DESCRIPCION</th><th class="amount">IMPORTE</th></tr></thead><tbody>${rows}</tbody></table>
  <div class="sep"></div>
+ ${bloqueDescuento}
  <div class="row"><span>${data.electronico ? 'OP. GRAVADA:' : 'SUB TOTAL:'}</span><span>${money(data.gravada)}</span></div>
  <div class="row"><span>IGV (${num(data.igv_porcentaje)}%):</span><span>${money(data.igv)}</span></div>
  <div class="row"><span>TOTAL:</span><span>${money(data.total)}</span></div>
