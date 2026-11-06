@@ -1338,6 +1338,40 @@ const zonaBelongsToSede = async (zonaId, sedeId) => {
     return rows.length > 0;
 };
 
+/**
+ * Subquery: id of the table whose open bill absorbed this one with "Juntar mesas", or NULL.
+ * A table stays joined while that bill is not paid/cancelled and it has no newer order of its own
+ * (older paid orders of the table do not matter, they are previous customers).
+ * `mesaRef` is the SQL expression with the table id (a column such as m.id, or ? for a parameter).
+ */
+const unidaAMesaSql = (mesaRef) => `(
+    SELECT pb.mesa_id
+    FROM pedidos po
+    JOIN pedidos pb ON pb.id = po.unido_a_pedido_id
+    WHERE po.mesa_id = ${mesaRef}
+      AND po.estado = 'cancelado'
+      AND pb.estado NOT IN ('pagado', 'cancelado')
+      AND pb.mesa_id <> po.mesa_id
+      AND NOT EXISTS (
+          SELECT 1 FROM pedidos pn
+          WHERE pn.mesa_id = po.mesa_id
+            AND pn.id > po.id
+            AND pn.estado <> 'cancelado'
+            AND EXISTS (SELECT 1 FROM detalles_pedido dpn WHERE dpn.pedido_id = pn.id)
+      )
+    ORDER BY po.id DESC
+    LIMIT 1
+)`;
+
+/** Table joined to another one (its bill lives there): { id, numero } of the destination table, or null. */
+const mesaUnidaA = async (connection, mesaId) => {
+    const [rows] = await connection.query(
+        `SELECT d.id, d.numero FROM mesas d WHERE d.id = ${unidaAMesaSql('?')}`,
+        [mesaId]
+    );
+    return rows[0] || null;
+};
+
 app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
     try {
         const [rows] = await pool.query(`
@@ -1355,17 +1389,7 @@ app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
                 ORDER BY p2.fecha_creacion DESC
                 LIMIT 1
             ) as ultimo_estado_pedido,
-            (
-                SELECT pb.mesa_id
-                FROM pedidos po
-                JOIN pedidos pb ON pb.id = po.unido_a_pedido_id
-                WHERE po.mesa_id = m.id
-                  AND po.estado = 'cancelado'
-                  AND pb.estado NOT IN ('pagado', 'cancelado')
-                  AND pb.mesa_id <> m.id
-                ORDER BY po.id DESC
-                LIMIT 1
-            ) as unida_a_mesa_id
+            ${unidaAMesaSql('m.id')} as unida_a_mesa_id
             FROM mesas m
             LEFT JOIN zonas z ON m.zona_id = z.id
             WHERE m.sede_id = ?
@@ -2596,6 +2620,13 @@ app.post('/api/pedidos', allowAdminOrWaiter, requireSede, async (req, res) => {
             return res.status(400).json({ error: 'La mesa no pertenece a esta sede' });
         }
 
+        // Una mesa unida a otra (Juntar mesas) no abre cuenta propia: sus productos van a la cuenta de la mesa destino.
+        const unidaA = await mesaUnidaA(connection, mesa_id);
+        if (unidaA) {
+            await connection.rollback();
+            return res.status(409).json({ error: `Esta mesa esta unida a la Mesa ${unidaA.numero}: agregue los productos en la cuenta de esa mesa.`, unida_a_mesa_id: Number(unidaA.id) });
+        }
+
         // Descuentos: solo con permiso; sin columnas en la base se ignoran.
         const descuentoGlobal = parsePct(req.body.descuento_global_pct);
         const descuentosLinea = detalles.map((item) => parsePct(item.descuento_pct));
@@ -2795,7 +2826,7 @@ app.put('/api/pedidos/:id/items', allowAdminOrWaiter, requireSede, async (req, r
 });
 
 // Juntar mesas: las comandas abiertas de las mesas de origen pasan a una sola comanda en la mesa de destino.
-// Si el destino no tiene comanda, la primera comanda de origen se muda a esa mesa y recibe las demas.
+// Si el destino no tiene comanda se le abre una y recibe todas; cada mesa de origen queda "unida" (ocupada) hasta pagar o liberar.
 app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (req, res) => {
     const sedeId = sedeOf(req);
     const destinoId = Number(req.body?.mesa_destino_id);
@@ -2813,6 +2844,8 @@ app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (re
         const [mesas] = await connection.query('SELECT id, numero FROM mesas WHERE sede_id = ? AND id IN (?)', [sedeId, [destinoId, ...origenIds]]);
         if (mesas.length !== origenIds.length + 1) throw Object.assign(new Error('Alguna mesa no pertenece a esta sede.'), { status: 400 });
         const numeroDe = new Map(mesas.map((m) => [Number(m.id), m.numero]));
+        const destinoUnidoA = await mesaUnidaA(connection, destinoId);
+        if (destinoUnidoA) throw Object.assign(new Error(`La Mesa ${numeroDe.get(destinoId)} ya esta unida a la Mesa ${destinoUnidoA.numero}: elija esa mesa como destino.`), { status: 409 });
 
         // Open order of each table (one per table), locked while the lines move.
         const abierto = async (mesaId) => {
@@ -2837,12 +2870,22 @@ app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (re
         const [facturados] = await connection.query('SELECT pedido_id FROM facturas WHERE pedido_id IN (?)', [todos.map((p) => p.id)]);
         if (facturados.length > 0) throw Object.assign(new Error('Una de las comandas ya tiene comprobante y no se puede juntar.'), { status: 409 });
 
-        const base = pedidosDestino[0] || pedidosOrigen[0];
+        // Si el destino esta libre se le abre una comanda nueva (copia de la cabecera de la primera de origen): asi TODAS las
+        // mesas de origen quedan marcadas como unidas y siguen ocupadas hasta que se pague o se libere la cuenta.
+        let base = pedidosDestino[0];
+        if (!base) {
+            const columnas = `sede_id, cliente_id, usuario_id, estado, fecha_creacion${tieneDescuentos ? ', descuento_global_pct' : ''}`;
+            const [nuevo] = await connection.query(
+                `INSERT INTO pedidos (mesa_id, ${columnas}) SELECT ?, ${columnas} FROM pedidos WHERE id = ?`,
+                [destinoId, pedidosOrigen[0].id]
+            );
+            base = { id: nuevo.insertId, mesa_id: destinoId };
+        }
         const resto = todos.filter((p) => Number(p.id) !== Number(base.id));
-        if (Number(base.mesa_id) !== destinoId) await connection.query('UPDATE pedidos SET mesa_id = ? WHERE id = ?', [destinoId, base.id]);
         for (const pedido of resto) {
             await connection.query('UPDATE detalles_pedido SET pedido_id = ? WHERE pedido_id = ?', [base.id, pedido.id]);
             await connection.query("UPDATE pedidos SET estado = 'cancelado', total = 0, unido_a_pedido_id = ? WHERE id = ?", [base.id, pedido.id]);
+            await connection.query('UPDATE pedidos SET unido_a_pedido_id = ? WHERE unido_a_pedido_id = ?', [base.id, pedido.id]);
         }
 
         // The merged order shows the least advanced state of its lines.
@@ -2853,7 +2896,7 @@ app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (re
             : lineas.some((l) => l.estado_comanda === 'en_cocina') ? 'en_proceso' : 'listo';
         await connection.query('UPDATE pedidos SET total = ?, estado = ? WHERE id = ?', [total, estado, base.id]);
         await connection.commit();
-        res.json({ id: Number(base.id), mesa_id: destinoId, mesa_numero: numeroDe.get(destinoId), total, mesas_juntadas: origenIds.length, comandas_unidas: resto.length + 1 });
+        res.json({ id: Number(base.id), mesa_id: destinoId, mesa_numero: numeroDe.get(destinoId), total, mesas_juntadas: origenIds.length, comandas_unidas: todos.length });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -8087,12 +8130,13 @@ const asegurarDescuentos = async () => {
     tieneDescuentos = true;
 };
 
-app.listen(PORT, () => {
+const iniciar = () => app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     permisos.iniciar();
     asegurarDescuentos().catch((err) => console.error('No se pudieron preparar las columnas de descuento:', err.message));
     asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();
-    setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref();
-});
+    setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref(); });
+if (require.main === module) iniciar();
+module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, cargarUnidadesSunat };

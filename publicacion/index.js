@@ -7,6 +7,7 @@ const pool = require('./db');
 const facturacion = require('./facturacion');
 const formatos = require('./formatosComprobante');
 const { hashPassword, isHashed, verifyPassword, signToken, verifyToken } = require('./auth');
+const permisos = require('./permisos');
 
 dotenv.config();
 
@@ -43,22 +44,27 @@ const PROFILE_ALIASES = {
 };
 const USUARIO_REGEX = /^[a-zA-Z0-9._-]{3,50}$/;
 
+// Accepts the built-in profiles (with their aliases) and any profile defined in the permissions screen.
 const normalizeProfile = (value) => {
     if (typeof value !== 'string') return null;
-    return PROFILE_ALIASES[value.toLowerCase().trim()] || null;
+    const key = value.toLowerCase().trim();
+    return PROFILE_ALIASES[key] || (permisos.get(key) ? key : null);
 };
 
 const isSuperadmin = (req) => req.userContext?.perfil === SUPERADMIN;
+// Superadmin and the profiles with multisede scope (p. ej. contador) see and pick any sede.
+const isMultisede = (req) => Boolean(req.userContext?.multisede);
 const sedeOf = (req) => req.userContext?.sedeId ?? null;
 
-// The superadmin passes every profile check; the rest need to be listed.
+// The superadmin passes every profile check. Everyone else passes when their base profile is listed (a custom profile such as
+// contador acts as its base: administrador, mozo, caja o cocina) or when a module added to their profile owns the route.
 const requireProfiles = (...allowedProfiles) => {
     const normalizedAllowed = allowedProfiles
         .map((profile) => normalizeProfile(profile))
         .filter(Boolean);
 
     return (req, res, next) => {
-        const currentProfile = normalizeProfile(req.userContext?.perfil);
+        const currentProfile = req.userContext?.perfil;
         if (!currentProfile) {
             return res.status(401).json({
                 error: 'No autenticado para esta operacion',
@@ -66,7 +72,7 @@ const requireProfiles = (...allowedProfiles) => {
             });
         }
 
-        if (currentProfile !== SUPERADMIN && !normalizedAllowed.includes(currentProfile)) {
+        if (currentProfile !== SUPERADMIN && !normalizedAllowed.includes(req.userContext.base) && !permisos.concedeRuta(req)) {
             return res.status(403).json({
                 error: 'No autorizado para esta operacion',
                 perfil_actual: currentProfile,
@@ -102,17 +108,31 @@ const USER_WITH_SEDE_SQL = `
     LEFT JOIN sedes s ON s.id = u.sede_id
 `;
 
-const toPublicUser = (row) => ({
-    id: Number(row.id),
-    nombre: row.nombre,
-    usuario: row.usuario,
-    email: row.email,
-    perfil: normalizeProfile(row.rol),
-    sede_id: row.sede_id !== null ? Number(row.sede_id) : null,
-    sede_nombre: row.sede_nombre || null
-});
+const toPublicUser = (row) => {
+    const perfil = normalizeProfile(row.rol);
+    const acceso = permisos.contextoDe(perfil);
+    return {
+        id: Number(row.id),
+        nombre: row.nombre,
+        usuario: row.usuario,
+        email: row.email,
+        perfil,
+        perfil_nombre: perfil === SUPERADMIN ? 'Super admin' : (permisos.get(perfil)?.nombre || perfil),
+        base: acceso.base,
+        multisede: acceso.multisede,
+        modulos: [...acceso.modulos],
+        sede_id: row.sede_id !== null ? Number(row.sede_id) : null,
+        sede_nombre: row.sede_nombre || null
+    };
+};
 
-const sedeIsUsable = (row) => normalizeProfile(row.rol) === SUPERADMIN || (row.sede_id && Number(row.sede_estado) === 1);
+// Multisede users may have no home sede; the rest need an active one.
+const sedeIsUsable = (row) => {
+    const perfil = normalizeProfile(row.rol);
+    if (perfil === SUPERADMIN) return true;
+    if (permisos.contextoDe(perfil).multisede && !row.sede_id) return true;
+    return Boolean(row.sede_id) && Number(row.sede_estado) === 1;
+};
 
 // --- Autenticacion ---
 app.post('/api/auth/login', async (req, res) => {
@@ -132,6 +152,9 @@ app.post('/api/auth/login', async (req, res) => {
 
         if (!user || !verifyPassword(password, user.password_hash)) {
             return res.status(401).json({ error: 'Usuario o clave incorrectos' });
+        }
+        if (!normalizeProfile(user.rol)) {
+            return res.status(403).json({ error: 'El perfil de este usuario ya no existe' });
         }
         if (!sedeIsUsable(user)) {
             return res.status(403).json({ error: 'La sede de este usuario esta inactiva' });
@@ -178,11 +201,16 @@ app.use('/api', async (req, res, next) => {
         }
 
         const perfil = normalizeProfile(user.rol);
+        if (!perfil) {
+            return res.status(403).json({ error: 'El perfil de este usuario ya no existe' });
+        }
+        const acceso = permisos.contextoDe(perfil);
         let sedeId = user.sede_id !== null ? Number(user.sede_id) : null;
 
-        if (perfil === SUPERADMIN) {
+        if (acceso.multisede) {
+            // The superadmin must pick a sede; other multisede profiles fall back to their own sede.
             const requested = Number(req.header('x-sede-id'));
-            sedeId = null;
+            if (perfil === SUPERADMIN) sedeId = null;
             if (Number.isInteger(requested) && requested > 0) {
                 const [sedeRows] = await pool.query('SELECT id FROM sedes WHERE id = ? LIMIT 1', [requested]);
                 if (sedeRows.length > 0) sedeId = requested;
@@ -193,6 +221,9 @@ app.use('/api', async (req, res, next) => {
             id: Number(user.id),
             nombre: user.nombre,
             perfil,
+            base: acceso.base,
+            multisede: acceso.multisede,
+            modulos: acceso.modulos,
             sedeUsuarioId: user.sede_id !== null ? Number(user.sede_id) : null,
             sedeId
         };
@@ -201,6 +232,9 @@ app.use('/api', async (req, res, next) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// A route that belongs to a module is closed to profiles without that module.
+app.use('/api', permisos.compuerta);
 
 app.get('/api/auth/me', async (req, res) => {
     try {
@@ -217,7 +251,7 @@ const SEDE_COLUMNS = 'id, nombre, direccion, telefono, estado, creado_en';
 
 app.get('/api/sedes', async (req, res) => {
     try {
-        if (isSuperadmin(req)) {
+        if (isMultisede(req)) {
             const [rows] = await pool.query(`
                 SELECT s.id, s.nombre, s.direccion, s.telefono, s.estado, s.creado_en,
                        (SELECT COUNT(*) FROM usuarios u WHERE u.sede_id = s.id) AS usuarios,
@@ -317,8 +351,147 @@ app.put('/api/sedes/:id', allowSuperadmin, async (req, res) => {
 });
 
 // --- Perfiles / Usuarios ---
+// Profiles a user may assign: multisede ones only when the user is multisede too (a sede administrator cannot widen a scope).
+const perfilesAsignables = (req) => permisos.todos()
+    .filter((p) => isMultisede(req) || p.alcance !== 'multisede')
+    .map((p) => p.codigo);
+
 app.get('/api/perfiles', (req, res) => {
-    res.json(isSuperadmin(req) ? [SUPERADMIN, ...USER_PROFILES] : USER_PROFILES);
+    res.json(isSuperadmin(req) ? [SUPERADMIN, ...perfilesAsignables(req)] : perfilesAsignables(req));
+});
+
+// Names and scope of every profile, for labels in any screen.
+app.get('/api/perfiles/detalle', (req, res) => {
+    res.json([
+        { codigo: SUPERADMIN, nombre: 'Super admin', alcance: 'multisede' },
+        ...permisos.todos().map((p) => ({ codigo: p.codigo, nombre: p.nombre, alcance: p.alcance }))
+    ]);
+});
+
+// --- Permisos por perfil (pantalla de permisos) ---
+const PERFIL_REGEX = /^[a-z][a-z0-9_]{2,29}$/;
+
+const perfilesConUsuarios = async () => {
+    const [rows] = await pool.query('SELECT rol, COUNT(*) AS total FROM usuarios GROUP BY rol');
+    return new Map(rows.map((r) => [r.rol, Number(r.total)]));
+};
+
+const perfilPublico = (p, usuarios) => ({
+    codigo: p.codigo, nombre: p.nombre, descripcion: p.descripcion, base: p.base, alcance: p.alcance,
+    sistema: Number(p.sistema) === 1, usuarios: usuarios.get(p.codigo) || 0, modulos: [...p.modulos]
+});
+
+app.get('/api/permisos', allowAdmin, async (req, res) => {
+    try {
+        const usuarios = await perfilesConUsuarios();
+        res.json({
+            modulos: permisos.MODULOS,
+            bases: permisos.BASES,
+            editable: permisos.estaListo(),
+            puede_alcance: isSuperadmin(req),
+            perfiles: permisos.todos().map((p) => perfilPublico(p, usuarios))
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+const exigirEsquemaPermisos = (res) => {
+    if (permisos.estaListo()) return true;
+    res.status(503).json({ error: 'Las tablas de permisos no estan disponibles: reinicie la aplicacion o revise la base de datos' });
+    return false;
+};
+
+app.post('/api/permisos/perfiles', allowAdmin, async (req, res) => {
+    if (!exigirEsquemaPermisos(res)) return;
+    const codigo = String(req.body?.codigo || '').trim().toLowerCase();
+    const nombre = String(req.body?.nombre || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    const descripcion = String(req.body?.descripcion || '').trim().slice(0, 255) || null;
+    const base = String(req.body?.base || '').trim();
+    const alcance = req.body?.alcance === 'multisede' ? 'multisede' : 'sede';
+    const copiarDe = permisos.get(req.body?.copiar_de);
+
+    if (!PERFIL_REGEX.test(codigo)) return res.status(400).json({ error: 'El codigo debe tener 3 a 30 caracteres: minusculas, numeros o guion bajo, empezando con letra' });
+    if (!nombre) return res.status(400).json({ error: 'Ingrese el nombre del perfil' });
+    if (!permisos.BASES.includes(base)) return res.status(400).json({ error: 'Seleccione el perfil base' });
+    if (codigo === SUPERADMIN || PROFILE_ALIASES[codigo] || permisos.get(codigo)) return res.status(409).json({ error: 'Ya existe un perfil con ese codigo' });
+    if (alcance === 'multisede' && !isSuperadmin(req)) return res.status(403).json({ error: 'Solo el super administrador crea perfiles multisede' });
+
+    try {
+        await pool.query(
+            'INSERT INTO perfiles (codigo, nombre, descripcion, base, alcance, sistema) VALUES (?, ?, ?, ?, ?, 0)',
+            [codigo, nombre, descripcion, base, alcance]
+        );
+        if (copiarDe && copiarDe.modulos.size > 0) {
+            await pool.query('INSERT INTO perfil_modulos (perfil, modulo) VALUES ?', [[...copiarDe.modulos].map((m) => [codigo, m])]);
+        }
+        await permisos.recargar();
+        res.status(201).json(perfilPublico(permisos.get(codigo), await perfilesConUsuarios()));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/permisos/perfiles/:codigo', allowAdmin, async (req, res) => {
+    if (!exigirEsquemaPermisos(res)) return;
+    const perfil = permisos.get(req.params.codigo);
+    if (!perfil) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const modulos = Array.isArray(req.body?.modulos) ? [...new Set(req.body.modulos.map(String))] : null;
+    if (modulos && modulos.some((m) => !permisos.MODULO_CLAVES.includes(m))) return res.status(400).json({ error: 'Hay un modulo que no existe' });
+    // Without settings the administrador could not open this screen again.
+    if (modulos && perfil.codigo === 'administrador' && !modulos.includes('settings')) {
+        return res.status(409).json({ error: 'El administrador debe conservar el modulo de configuracion' });
+    }
+    const nombre = req.body?.nombre !== undefined ? String(req.body.nombre).trim().replace(/\s+/g, ' ').slice(0, 60) : perfil.nombre;
+    if (!nombre) return res.status(400).json({ error: 'Ingrese el nombre del perfil' });
+    const descripcion = req.body?.descripcion !== undefined ? (String(req.body.descripcion).trim().slice(0, 255) || null) : perfil.descripcion;
+
+    // Scope and base change what the profile can do beyond the modules, so only the superadmin touches them.
+    let alcance = perfil.alcance;
+    let base = perfil.base;
+    if (req.body?.alcance !== undefined || req.body?.base !== undefined) {
+        if (!isSuperadmin(req)) return res.status(403).json({ error: 'Solo el super administrador cambia el alcance o el perfil base' });
+        if (req.body.alcance !== undefined) alcance = req.body.alcance === 'multisede' ? 'multisede' : 'sede';
+        if (req.body.base !== undefined) {
+            if (!permisos.BASES.includes(req.body.base)) return res.status(400).json({ error: 'Perfil base invalido' });
+            base = req.body.base;
+        }
+    }
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        await connection.query('UPDATE perfiles SET nombre = ?, descripcion = ?, base = ?, alcance = ? WHERE codigo = ?', [nombre, descripcion, base, alcance, perfil.codigo]);
+        if (modulos) {
+            await connection.query('DELETE FROM perfil_modulos WHERE perfil = ?', [perfil.codigo]);
+            if (modulos.length > 0) await connection.query('INSERT INTO perfil_modulos (perfil, modulo) VALUES ?', [modulos.map((m) => [perfil.codigo, m])]);
+        }
+        await connection.commit();
+        await permisos.recargar();
+        res.json(perfilPublico(permisos.get(perfil.codigo), await perfilesConUsuarios()));
+    } catch (err) {
+        await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        connection.release();
+    }
+});
+
+app.delete('/api/permisos/perfiles/:codigo', allowAdmin, async (req, res) => {
+    if (!exigirEsquemaPermisos(res)) return;
+    const perfil = permisos.get(req.params.codigo);
+    if (!perfil) return res.status(404).json({ error: 'Perfil no encontrado' });
+    if (Number(perfil.sistema) === 1) return res.status(409).json({ error: 'Los perfiles base del sistema no se pueden eliminar' });
+    try {
+        const usuarios = await perfilesConUsuarios();
+        if ((usuarios.get(perfil.codigo) || 0) > 0) return res.status(409).json({ error: 'El perfil tiene usuarios asignados: cambialos de perfil primero' });
+        await pool.query('DELETE FROM perfiles WHERE codigo = ?', [perfil.codigo]);
+        await permisos.recargar();
+        res.json({ message: 'Perfil eliminado' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 const USER_LIST_SQL = `
@@ -358,9 +531,15 @@ const resolveTargetSede = async (req, perfil, requestedSedeId, fallbackSedeId) =
     if (perfil === SUPERADMIN) {
         return isSuperadmin(req) ? { sedeId: null } : { status: 403, error: 'No autorizado para crear super administradores' };
     }
-    if (!isSuperadmin(req)) return { sedeId: req.userContext.sedeUsuarioId };
+    const multisedePerfil = permisos.contextoDe(perfil).multisede;
+    if (!isSuperadmin(req)) {
+        if (multisedePerfil) return { status: 403, error: 'Solo el super administrador asigna perfiles multisede' };
+        return { sedeId: req.userContext.sedeUsuarioId };
+    }
 
-    const sedeId = Number(requestedSedeId) || fallbackSedeId || sedeOf(req);
+    // A multisede profile (p. ej. contador) may have no home sede.
+    const sedeId = Number(requestedSedeId) || fallbackSedeId || (multisedePerfil ? null : sedeOf(req));
+    if (!sedeId && multisedePerfil) return { sedeId: null };
     if (!sedeId) return { status: 400, error: 'Seleccione la sede del usuario' };
     const [rows] = await pool.query('SELECT id FROM sedes WHERE id = ? LIMIT 1', [sedeId]);
     if (rows.length === 0) return { status: 400, error: 'Sede no encontrada' };
@@ -375,7 +554,7 @@ app.post('/api/usuarios', allowAdmin, async (req, res) => {
     if (!nombre || !email || !login || !password || !normalizedProfile) {
         return res.status(400).json({
             error: 'nombre, usuario, email, password y perfil son obligatorios',
-            perfiles_validos: USER_PROFILES
+            perfiles_validos: permisos.todos().map((p) => p.codigo)
         });
     }
     if (!USUARIO_REGEX.test(login)) {
@@ -421,7 +600,7 @@ app.put('/api/usuarios/:id', allowAdmin, async (req, res) => {
         if (!normalizedProfile) {
             return res.status(400).json({
                 error: 'Perfil invalido',
-                perfiles_validos: USER_PROFILES
+                perfiles_validos: permisos.todos().map((p) => p.codigo)
             });
         }
 
@@ -566,7 +745,7 @@ app.post('/api/clientes', allowAdminWaiterCashier, async (req, res) => {
             'INSERT INTO clientes (nombre, telefono, email, documento, tipo_documento, direccion) VALUES (?, ?, ?, ?, ?, ?)',
             [nombre, telefono, email, documento, ['DNI', 'RUC', 'CE', 'PAS'].includes(tipoDocumento) ? tipoDocumento : null, direccion || null]
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -741,7 +920,7 @@ app.post('/api/cajas', allowAdmin, requireSede, async (req, res) => {
             'INSERT INTO cajas (sede_id, descripcion, saldo, estado) VALUES (?, ?, ?, ?)',
             [sedeOf(req), descripcion, saldo || 0, estado || 'cerrada']
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1159,6 +1338,40 @@ const zonaBelongsToSede = async (zonaId, sedeId) => {
     return rows.length > 0;
 };
 
+/**
+ * Subquery: id of the table whose open bill absorbed this one with "Juntar mesas", or NULL.
+ * A table stays joined while that bill is not paid/cancelled and it has no newer order of its own
+ * (older paid orders of the table do not matter, they are previous customers).
+ * `mesaRef` is the SQL expression with the table id (a column such as m.id, or ? for a parameter).
+ */
+const unidaAMesaSql = (mesaRef) => `(
+    SELECT pb.mesa_id
+    FROM pedidos po
+    JOIN pedidos pb ON pb.id = po.unido_a_pedido_id
+    WHERE po.mesa_id = ${mesaRef}
+      AND po.estado = 'cancelado'
+      AND pb.estado NOT IN ('pagado', 'cancelado')
+      AND pb.mesa_id <> po.mesa_id
+      AND NOT EXISTS (
+          SELECT 1 FROM pedidos pn
+          WHERE pn.mesa_id = po.mesa_id
+            AND pn.id > po.id
+            AND pn.estado <> 'cancelado'
+            AND EXISTS (SELECT 1 FROM detalles_pedido dpn WHERE dpn.pedido_id = pn.id)
+      )
+    ORDER BY po.id DESC
+    LIMIT 1
+)`;
+
+/** Table joined to another one (its bill lives there): { id, numero } of the destination table, or null. */
+const mesaUnidaA = async (connection, mesaId) => {
+    const [rows] = await connection.query(
+        `SELECT d.id, d.numero FROM mesas d WHERE d.id = ${unidaAMesaSql('?')}`,
+        [mesaId]
+    );
+    return rows[0] || null;
+};
+
 app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
     try {
         const [rows] = await pool.query(`
@@ -1167,6 +1380,7 @@ app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
                 SELECT p2.estado
                 FROM pedidos p2
                 WHERE p2.mesa_id = m.id
+                  AND p2.estado <> 'cancelado'
                   AND EXISTS (
                       SELECT 1
                       FROM detalles_pedido dp2
@@ -1174,7 +1388,8 @@ app.get('/api/mesas', allowAnyProfile, requireSede, async (req, res) => {
                   )
                 ORDER BY p2.fecha_creacion DESC
                 LIMIT 1
-            ) as ultimo_estado_pedido
+            ) as ultimo_estado_pedido,
+            ${unidaAMesaSql('m.id')} as unida_a_mesa_id
             FROM mesas m
             LEFT JOIN zonas z ON m.zona_id = z.id
             WHERE m.sede_id = ?
@@ -1210,7 +1425,7 @@ app.post('/api/mesas', allowAdmin, requireSede, async (req, res) => {
             'INSERT INTO mesas (sede_id, numero, capacidad, zona_id) VALUES (?, ?, ?, ?)',
             [sedeOf(req), numero, capacidad, zona_id]
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         if (err.code === 'ER_DUP_ENTRY') {
             return res.status(409).json({ error: 'Ya existe una mesa con ese numero en esta sede' });
@@ -1266,7 +1481,7 @@ app.post('/api/proveedores', allowAdminKitchenForWrites, async (req, res) => {
             'INSERT INTO proveedores (razon_social, ruc, contacto, telefono, direccion, nro_cuenta, observaciones) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [razon_social, ruc, contacto, telefono, direccion, nroCuenta, observaciones]
         );
-        res.json({ id: result.insertId, ...req.body, nro_cuenta: nroCuenta, observaciones });
+        res.json({ ...req.body, id: result.insertId, nro_cuenta: nroCuenta, observaciones });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1346,16 +1561,21 @@ const adjustProductStock = async (connection, sedeId, productoId, delta, almacen
 );
 
 /**
- * Finished products (bar categories or items that are not prepared from a recipe) leave the sales warehouse when
- * the order is sold. Stock may go negative: selling is never blocked by a missing count.
+ * Products that keep stock ("Sin stock" unchecked, es_receta = 0) leave the sales warehouse when the order is sold;
+ * the ones marked "Sin stock" (es_receta = 1) never move stock, bar category or not. Stock may go negative: selling is never blocked by a missing count.
  */
+// True once productos.factor_venta exists (se crea al iniciar); mientras no, cada unidad vendida descuenta 1 como antes.
+let tieneFactorVenta = false;
+// True once productos.costo_unitario exists (se crea al iniciar).
+let tieneCostoProducto = false;
+
 const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usuarioId) => {
     const [items] = await connection.query(
-        `SELECT dp.producto_id, SUM(dp.cantidad) AS cantidad
+        `SELECT dp.producto_id, ROUND(SUM(dp.cantidad) * ${tieneFactorVenta ? 'MAX(p.factor_venta)' : '1'}, 3) AS cantidad
          FROM detalles_pedido dp
          JOIN productos p ON p.id = dp.producto_id
          LEFT JOIN tipos_producto tp ON tp.id = p.tipo_id
-         WHERE dp.pedido_id = ? AND (tp.es_barra = 1 OR p.es_receta = 0)
+         WHERE dp.pedido_id = ? AND p.es_receta = 0
          GROUP BY dp.producto_id`,
         [pedidoId]
     );
@@ -1433,11 +1653,13 @@ const factorConversion = async (connection, desdeId, haciaId) => {
  * Quantity line typed in `unidadId` for an item stocked in its own unit (catalogo.unidad_id):
  * factor to the stock unit, and whether the quantity must be a whole number.
  */
+const esEntero = (tipoItem, catalogo) => !Number(catalogo.permite_decimales ?? (tipoItem === 'producto' ? 0 : 1));
+
 const unidadDeLinea = async (connection, tipoItem, catalogo, unidadId, nombre) => {
     const base = catalogo.unidad_id ? Number(catalogo.unidad_id) : null;
     const elegida = unidadId ? Number(unidadId) : null;
     if (!elegida || !base || elegida === base) {
-        return { factor: 1, entero: tipoItem === 'producto' || !Number(catalogo.permite_decimales ?? 1) };
+        return { factor: 1, entero: esEntero(tipoItem, catalogo) };
     }
     if (tipoItem !== 'insumo') throw httpError(400, `${nombre} no admite conversion de unidades`);
     const unidad = await unidadValida(connection, elegida);
@@ -1691,7 +1913,7 @@ app.post('/api/insumos', allowAdminKitchenForWrites, requireSede, async (req, re
         );
         await setSupplyStock(connection, sedeOf(req), result.insertId, stock_actual);
         await connection.commit();
-        res.json({ id: result.insertId, ...req.body, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
+        res.json({ ...req.body, id: result.insertId, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -1896,7 +2118,7 @@ app.post('/api/categorias', allowAdminKitchenForWrites, async (req, res) => {
             'INSERT INTO tipos_producto (nombre, descripcion, es_barra) VALUES (?, ?, ?)',
             [nombre, descripcion, es_barra || false]
         );
-        res.json({ id: result.insertId, ...req.body });
+        res.json({ ...req.body, id: result.insertId });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1927,7 +2149,7 @@ app.delete('/api/categorias/:id', allowAdminKitchenForWrites, async (req, res) =
 // --- Productos (carta compartida, stock por sede) ---
 const PRODUCT_SELECT_SQL = `
     SELECT p.*, (SELECT COALESCE(SUM(sp.stock), 0) FROM stock_productos sp WHERE sp.producto_id = p.id AND sp.sede_id = ?) AS stock,
-           t.nombre as tipo_nombre, t.es_barra, COALESCE(um.abreviatura, 'Unidad') AS unidad_medida,
+           t.nombre as tipo_nombre, t.es_barra, COALESCE(um.abreviatura, 'Unidad') AS unidad_medida, COALESCE(um.permite_decimales, 0) AS unidad_decimales,
            CASE WHEN EXISTS (SELECT 1 FROM producto_imagenes pi WHERE pi.producto_id = p.id)
                 THEN CONCAT('/api/productos/', p.id, '/imagen') ELSE NULL END AS imagen_url
     FROM productos p
@@ -1995,19 +2217,41 @@ app.get('/api/productos/:id', allowAnyProfile, requireSede, async (req, res) => 
     }
 });
 
+/**
+ * Units of stock that each unit sold takes out (a 620 ml bottle of beer stocked in litres: 0.62). Blank or missing means 1.
+ * `actual` is the value to keep when the client sends nothing.
+ */
+const parseFactorVenta = (valor, actual = 1) => {
+    if (valor === undefined || valor === null || valor === '') return actual;
+    const factor = Math.round(Number(valor) * 10000) / 10000;
+    if (!(factor > 0) || factor > 100000) throw httpError(400, 'El descuento de stock por unidad vendida debe ser mayor a 0');
+    return factor;
+};
+
+/** Unit cost of a product typed in the menu form; blank or missing means "leave it as it is" (null). */
+const parseCostoProducto = (valor) => {
+    if (valor === undefined || valor === null || valor === '') return null;
+    const costo = Math.round(Number(valor) * 10000) / 10000;
+    if (!(costo >= 0) || costo > 100000) throw httpError(400, 'El costo unitario no es valido');
+    return costo;
+};
+
 app.post('/api/productos', allowAdminKitchenForWrites, requireSede, async (req, res) => {
     const { nombre, descripcion, precio, tipo_id, es_receta, disponible, stock } = req.body;
     const connection = await pool.getConnection();
     try {
+        const factorVenta = parseFactorVenta(req.body.factor_venta);
+        const costoProducto = parseCostoProducto(req.body.costo_unitario);
         await connection.beginTransaction();
         const unidad = await resolverUnidad(connection, req.body);
         const [result] = await connection.query(
-            'INSERT INTO productos (nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [nombre, descripcion, precio, tipo_id, es_receta !== undefined ? es_receta : true, disponible !== undefined ? disponible : true, unidad.id]
+            `INSERT INTO productos (nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad_id${tieneFactorVenta ? ', factor_venta' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?${tieneFactorVenta ? ', ?' : ''})`,
+            [nombre, descripcion, precio, tipo_id, es_receta !== undefined ? es_receta : true, disponible !== undefined ? disponible : true, unidad.id, ...(tieneFactorVenta ? [factorVenta] : [])]
         );
+        if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, result.insertId]);
         await setProductStock(connection, sedeOf(req), result.insertId, stock);
         await connection.commit();
-        res.json({ id: result.insertId, ...req.body, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
+        res.json({ ...req.body, id: result.insertId, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -2023,9 +2267,12 @@ app.put('/api/productos/:id', allowAdminKitchenForWrites, requireSede, async (re
         await connection.beginTransaction();
         // Clients that do not send a unit keep the one the product already has.
         const unidad = req.body.unidad_id || req.body.unidad_medida ? await resolverUnidad(connection, req.body) : null;
+        const factorVenta = parseFactorVenta(req.body.factor_venta, null);
+        const costoProducto = parseCostoProducto(req.body.costo_unitario);
+        if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, req.params.id]);
         await connection.query(
-            'UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id) WHERE id = ?',
-            [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, req.params.id]
+            `UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id)${tieneFactorVenta ? ', factor_venta = COALESCE(?, factor_venta)' : ''} WHERE id = ?`,
+            [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, ...(tieneFactorVenta ? [factorVenta] : []), req.params.id]
         );
         await setProductStock(connection, sedeOf(req), req.params.id, stock);
         await connection.commit();
@@ -2048,10 +2295,50 @@ app.delete('/api/productos/:id', allowAdminKitchenForWrites, async (req, res) =>
 });
 
 // --- Pedidos ---
+// Observacion opcional de un plato ("sin cebolla", "punto medio"): texto corto, la cocina la ve con un boton.
+const notaPlato = (valor) => String(valor ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
+
+// Descuentos %: uno por plato (detalles_pedido.descuento_pct) y uno global de la cuenta (pedidos.descuento_global_pct).
+// detalles_pedido.precio_unitario es el precio de carta y detalles_pedido.subtotal el importe NETO de la linea (con ambos
+// descuentos), asi pedidos.total = SUM(subtotal) sigue valiendo en todas las pantallas y el comprobante usa el mismo importe.
+let tieneDescuentos = false;
+const parsePct = (valor) => {
+    if (valor === undefined || valor === null || valor === '') return 0;
+    const n = Math.round(Number(valor) * 100) / 100;
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw Object.assign(new Error('El descuento debe estar entre 0 y 100 %.'), { status: 400 });
+    return n;
+};
+const montoNeto = (precio, cantidad, pctLinea, pctGlobal) =>
+    Math.round((Math.round(Number(precio) * 100) * Number(cantidad) / 100) * (1 - pctLinea / 100) * (1 - pctGlobal / 100) * 100) / 100;
+const puedeDescontar = (req) => req.userContext?.perfil === permisos.SUPERADMIN || Boolean(req.userContext?.modulos?.has('descuentos'));
+const exigirPermisoDescuento = (req) => {
+    if (!puedeDescontar(req)) throw Object.assign(new Error('Su perfil no tiene permiso para aplicar descuentos.'), { status: 403 });
+};
+
+/** Recalcula el importe neto de cada linea y el total de una comanda con sus descuentos vigentes. */
+const recalcularPedido = async (connection, pedidoId) => {
+    const [[pedido]] = await connection.query(
+        `SELECT ${tieneDescuentos ? 'descuento_global_pct' : '0 AS descuento_global_pct'} FROM pedidos WHERE id = ?`, [pedidoId]
+    );
+    const global = Number(pedido?.descuento_global_pct) || 0;
+    const [lineas] = await connection.query(
+        `SELECT id, cantidad, precio_unitario, ${tieneDescuentos ? 'descuento_pct' : '0 AS descuento_pct'} FROM detalles_pedido WHERE pedido_id = ?`, [pedidoId]
+    );
+    let total = 0;
+    for (const linea of lineas) {
+        const neto = montoNeto(linea.precio_unitario, linea.cantidad, Number(linea.descuento_pct) || 0, global);
+        total += neto;
+        await connection.query('UPDATE detalles_pedido SET subtotal = ? WHERE id = ?', [neto, linea.id]);
+    }
+    total = Math.round(total * 100) / 100;
+    await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, pedidoId]);
+    return total;
+};
+
 app.get('/api/pedidos/mesa/:mesaId/activo', allowAdminWaiterCashier, requireSede, async (req, res) => {
     try {
         const [pedidos] = await pool.query(`
-            SELECT id, estado, total
+            SELECT id, estado, total${tieneDescuentos ? ', descuento_global_pct' : ''}
             FROM pedidos
             WHERE mesa_id = ?
               AND sede_id = ?
@@ -2080,6 +2367,44 @@ app.get('/api/pedidos/mesa/:mesaId/activo', allowAdminWaiterCashier, requireSede
         res.json({ ...pedido, detalles });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Libera una mesa cuya comanda sigue "Recibida" en cocina/barra: ninguna linea empezo a prepararse. La comanda se cancela
+// (el stock se descuenta recien al facturar, asi que no hay nada que restituir) y la mesa queda libre.
+app.post('/api/pedidos/mesa/:mesaId/liberar', allowAdminOrWaiter, requireSede, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const [pedidos] = await connection.query(
+            `SELECT p.id FROM pedidos p
+             WHERE p.mesa_id = ? AND p.sede_id = ? AND p.estado NOT IN ('pagado', 'cancelado')
+               AND EXISTS (SELECT 1 FROM detalles_pedido dp WHERE dp.pedido_id = p.id)
+             ORDER BY p.fecha_creacion ASC FOR UPDATE`,
+            [req.params.mesaId, sedeOf(req)]
+        );
+        if (pedidos.length === 0) throw Object.assign(new Error('La mesa no tiene una comanda abierta.'), { status: 409 });
+        const ids = pedidos.map((p) => p.id);
+
+        const [facturados] = await connection.query('SELECT 1 FROM facturas WHERE pedido_id IN (?) LIMIT 1', [ids]);
+        if (facturados.length > 0) throw Object.assign(new Error('La comanda ya tiene comprobante: no se puede liberar la mesa.'), { status: 409 });
+
+        const [avanzados] = await connection.query(
+            "SELECT 1 FROM detalles_pedido WHERE pedido_id IN (?) AND estado_comanda <> 'pendiente' LIMIT 1",
+            [ids]
+        );
+        if (avanzados.length > 0) {
+            throw Object.assign(new Error('No se puede liberar la mesa: cocina o barra ya empezo a preparar algun producto. Solo se libera mientras todos sigan en Recibido.'), { status: 409 });
+        }
+
+        await connection.query("UPDATE pedidos SET estado = 'cancelado', total = 0 WHERE id IN (?)", [ids]);
+        await connection.commit();
+        res.json({ message: 'Mesa liberada', comandas_canceladas: ids.length });
+    } catch (err) {
+        await connection.rollback();
+        res.status(err.status || 500).json({ error: err.message });
+    } finally {
+        connection.release();
     }
 });
 
@@ -2295,27 +2620,43 @@ app.post('/api/pedidos', allowAdminOrWaiter, requireSede, async (req, res) => {
             return res.status(400).json({ error: 'La mesa no pertenece a esta sede' });
         }
 
+        // Una mesa unida a otra (Juntar mesas) no abre cuenta propia: sus productos van a la cuenta de la mesa destino.
+        const unidaA = await mesaUnidaA(connection, mesa_id);
+        if (unidaA) {
+            await connection.rollback();
+            return res.status(409).json({ error: `Esta mesa esta unida a la Mesa ${unidaA.numero}: agregue los productos en la cuenta de esa mesa.`, unida_a_mesa_id: Number(unidaA.id) });
+        }
+
+        // Descuentos: solo con permiso; sin columnas en la base se ignoran.
+        const descuentoGlobal = parsePct(req.body.descuento_global_pct);
+        const descuentosLinea = detalles.map((item) => parsePct(item.descuento_pct));
+        if (descuentoGlobal > 0 || descuentosLinea.some((pct) => pct > 0)) {
+            exigirPermisoDescuento(req);
+            if (!tieneDescuentos) throw Object.assign(new Error('Los descuentos aun no estan disponibles: reinicie el servidor.'), { status: 409 });
+        }
+
         // Create Header
         const [orderResult] = await connection.query(
-            'INSERT INTO pedidos (sede_id, mesa_id, cliente_id, usuario_id, estado) VALUES (?, ?, ?, ?, ?)',
-            [sedeId, mesa_id, cliente_id, usuario_id, 'pendiente']
+            `INSERT INTO pedidos (sede_id, mesa_id, cliente_id, usuario_id, estado${tieneDescuentos ? ', descuento_global_pct' : ''}) VALUES (?, ?, ?, ?, ?${tieneDescuentos ? ', ?' : ''})`,
+            [sedeId, mesa_id, cliente_id, usuario_id, 'pendiente', ...(tieneDescuentos ? [descuentoGlobal] : [])]
         );
         const pedidoId = orderResult.insertId;
 
         // Create Details
         let total = 0;
-        for (const item of detalles) {
+        for (const [index, item] of detalles.entries()) {
             // Get product price
             const [prodRows] = await connection.query('SELECT precio FROM productos WHERE id = ?', [item.producto_id]);
             const precio = prodRows[0].precio;
-            const subtotal = precio * item.cantidad;
+            const subtotal = montoNeto(precio, item.cantidad, descuentosLinea[index], descuentoGlobal);
             total += subtotal;
 
             await connection.query(
-                'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, item.notas || '']
+                `INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas${tieneDescuentos ? ', descuento_pct' : ''}) VALUES (?, ?, ?, ?, ?, ?${tieneDescuentos ? ', ?' : ''})`,
+                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, notaPlato(item.notas), ...(tieneDescuentos ? [descuentosLinea[index]] : [])]
             );
         }
+        total = Math.round(total * 100) / 100;
 
         // Update Total
         await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, pedidoId]);
@@ -2325,7 +2666,7 @@ app.post('/api/pedidos', allowAdminOrWaiter, requireSede, async (req, res) => {
 
     } catch (err) {
         await connection.rollback();
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
     } finally {
         connection.release();
     }
@@ -2350,7 +2691,7 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
     try {
         await connection.beginTransaction();
         const [orders] = await connection.query(
-            'SELECT id, estado FROM pedidos WHERE id = ? AND sede_id = ? LIMIT 1 FOR UPDATE',
+            `SELECT id, estado${tieneDescuentos ? ', descuento_global_pct' : ''} FROM pedidos WHERE id = ? AND sede_id = ? LIMIT 1 FOR UPDATE`,
             [req.params.id, sedeOf(req)]
         );
         const order = orders[0];
@@ -2369,12 +2710,23 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
         }
 
         const [currentRows] = await connection.query(
-            'SELECT id, producto_id, precio_unitario FROM detalles_pedido WHERE pedido_id = ? ORDER BY id FOR UPDATE',
+            `SELECT id, producto_id, precio_unitario${tieneDescuentos ? ', descuento_pct' : ''} FROM detalles_pedido WHERE pedido_id = ? ORDER BY id FOR UPDATE`,
             [order.id]
         );
         const currentById = new Map(currentRows.map((row) => [Number(row.id), row]));
         const seenDetailIds = new Set();
         const normalizedItems = [];
+
+        // Descuentos: si no se envian se conservan; cambiarlos exige el permiso (lo que ya estaba guardado no lo exige).
+        const globalActual = Number(order.descuento_global_pct) || 0;
+        const globalNuevo = req.body.descuento_global_pct === undefined ? globalActual : parsePct(req.body.descuento_global_pct);
+        let cambiaDescuento = globalNuevo !== globalActual;
+        const pctDe = (item, anterior) => {
+            const pct = item.descuento_pct === undefined ? anterior : parsePct(item.descuento_pct);
+            if (pct !== anterior) cambiaDescuento = true;
+            return pct;
+        };
+
         for (const item of detalles) {
             const detailId = item.detalle_id == null ? null : Number(item.detalle_id);
             const productId = Number(item.producto_id);
@@ -2385,25 +2737,29 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
                     throw Object.assign(new Error('Una de las lineas ya no corresponde a esta comanda. Recarga e intenta nuevamente.'), { status: 409 });
                 }
                 seenDetailIds.add(detailId);
-                normalizedItems.push({ detailId, productId, quantity, price: Number(existing.precio_unitario) });
+                normalizedItems.push({ detailId, productId, quantity, price: Number(existing.precio_unitario), pct: pctDe(item, Number(existing.descuento_pct) || 0), notas: typeof item.notas === 'string' ? notaPlato(item.notas) : null });
             } else {
                 const [products] = await connection.query('SELECT precio FROM productos WHERE id = ? AND disponible = 1 LIMIT 1', [productId]);
                 if (!products.length) throw Object.assign(new Error('Uno de los productos agregados ya no esta disponible.'), { status: 409 });
-                normalizedItems.push({ detailId: null, productId, quantity, price: Number(products[0].precio) });
+                normalizedItems.push({ detailId: null, productId, quantity, price: Number(products[0].precio), pct: pctDe(item, 0), notas: notaPlato(item.notas) });
             }
+        }
+        if (cambiaDescuento) {
+            exigirPermisoDescuento(req);
+            if (!tieneDescuentos) throw Object.assign(new Error('Los descuentos aun no estan disponibles: reinicie el servidor.'), { status: 409 });
         }
 
         for (const item of normalizedItems) {
-            const subtotal = Math.round(item.price * 100) * item.quantity / 100;
+            const subtotal = montoNeto(item.price, item.quantity, item.pct, globalNuevo);
             if (item.detailId !== null) {
                 await connection.query(
-                    'UPDATE detalles_pedido SET cantidad = ?, subtotal = ? WHERE id = ? AND pedido_id = ?',
-                    [item.quantity, subtotal, item.detailId, order.id]
+                    `UPDATE detalles_pedido SET cantidad = ?, subtotal = ?, notas = COALESCE(?, notas)${tieneDescuentos ? ', descuento_pct = ?' : ''} WHERE id = ? AND pedido_id = ?`,
+                    [item.quantity, subtotal, item.notas, ...(tieneDescuentos ? [item.pct] : []), item.detailId, order.id]
                 );
             } else {
                 await connection.query(
-                    'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                    [order.id, item.productId, item.quantity, item.price, subtotal, '']
+                    `INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas${tieneDescuentos ? ', descuento_pct' : ''}) VALUES (?, ?, ?, ?, ?, ?${tieneDescuentos ? ', ?' : ''})`,
+                    [order.id, item.productId, item.quantity, item.price, subtotal, item.notas || '', ...(tieneDescuentos ? [item.pct] : [])]
                 );
             }
         }
@@ -2413,16 +2769,16 @@ app.put('/api/pedidos/:id/detalles', allowAdminWaiterCashier, requireSede, async
         }
         const [totals] = await connection.query('SELECT COALESCE(SUM(subtotal), 0) AS total FROM detalles_pedido WHERE pedido_id = ?', [order.id]);
         const total = Number(totals[0]?.total || 0);
-        await connection.query('UPDATE pedidos SET total = ? WHERE id = ?', [total, order.id]);
+        await connection.query(`UPDATE pedidos SET total = ?${tieneDescuentos ? ', descuento_global_pct = ?' : ''} WHERE id = ?`, [total, ...(tieneDescuentos ? [globalNuevo] : []), order.id]);
         const [savedRows] = await connection.query(
-            `SELECT dp.id, dp.id AS detalle_id, dp.producto_id, dp.cantidad, dp.precio_unitario, dp.subtotal,
-                    p.nombre AS producto_nombre, dp.estado_comanda
+            `SELECT dp.id, dp.id AS detalle_id, dp.producto_id, dp.cantidad, dp.precio_unitario, dp.subtotal, dp.notas,
+                    ${tieneDescuentos ? 'dp.descuento_pct,' : ''} p.nombre AS producto_nombre, dp.estado_comanda
              FROM detalles_pedido dp JOIN productos p ON p.id = dp.producto_id
              WHERE dp.pedido_id = ? ORDER BY dp.id`,
             [order.id]
         );
         await connection.commit();
-        res.json({ id: Number(order.id), total, detalles: savedRows });
+        res.json({ id: Number(order.id), total, descuento_global_pct: globalNuevo, detalles: savedRows });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -2445,21 +2801,19 @@ app.put('/api/pedidos/:id/items', allowAdminOrWaiter, requireSede, async (req, r
             return res.status(404).json({ error: 'Pedido no encontrado' });
         }
 
-        let totalAdicional = 0;
         for (const item of detalles) {
             const [prodRows] = await connection.query('SELECT precio FROM productos WHERE id = ?', [item.producto_id]);
             const precio = prodRows[0].precio;
-            const subtotal = precio * item.cantidad;
-            totalAdicional += subtotal;
 
             await connection.query(
                 'INSERT INTO detalles_pedido (pedido_id, producto_id, cantidad, precio_unitario, subtotal, notas) VALUES (?, ?, ?, ?, ?, ?)',
-                [pedidoId, item.producto_id, item.cantidad, precio, subtotal, item.notas || '']
+                [pedidoId, item.producto_id, item.cantidad, precio, precio * item.cantidad, notaPlato(item.notas)]
             );
         }
 
-        // Update Total
-        await connection.query('UPDATE pedidos SET total = total + ?, estado = ? WHERE id = ?', [totalAdicional, 'pendiente', pedidoId]);
+        // Update Total (con los descuentos vigentes de la comanda)
+        await recalcularPedido(connection, pedidoId);
+        await connection.query('UPDATE pedidos SET estado = ? WHERE id = ?', ['pendiente', pedidoId]);
 
         await connection.commit();
         res.json({ message: 'Items añadidos al pedido' });
@@ -2472,7 +2826,7 @@ app.put('/api/pedidos/:id/items', allowAdminOrWaiter, requireSede, async (req, r
 });
 
 // Juntar mesas: las comandas abiertas de las mesas de origen pasan a una sola comanda en la mesa de destino.
-// Si el destino no tiene comanda, la primera comanda de origen se muda a esa mesa y recibe las demas.
+// Si el destino no tiene comanda se le abre una y recibe todas; cada mesa de origen queda "unida" (ocupada) hasta pagar o liberar.
 app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (req, res) => {
     const sedeId = sedeOf(req);
     const destinoId = Number(req.body?.mesa_destino_id);
@@ -2490,6 +2844,8 @@ app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (re
         const [mesas] = await connection.query('SELECT id, numero FROM mesas WHERE sede_id = ? AND id IN (?)', [sedeId, [destinoId, ...origenIds]]);
         if (mesas.length !== origenIds.length + 1) throw Object.assign(new Error('Alguna mesa no pertenece a esta sede.'), { status: 400 });
         const numeroDe = new Map(mesas.map((m) => [Number(m.id), m.numero]));
+        const destinoUnidoA = await mesaUnidaA(connection, destinoId);
+        if (destinoUnidoA) throw Object.assign(new Error(`La Mesa ${numeroDe.get(destinoId)} ya esta unida a la Mesa ${destinoUnidoA.numero}: elija esa mesa como destino.`), { status: 409 });
 
         // Open order of each table (one per table), locked while the lines move.
         const abierto = async (mesaId) => {
@@ -2514,22 +2870,33 @@ app.post('/api/pedidos/juntar-mesas', allowAdminOrWaiter, requireSede, async (re
         const [facturados] = await connection.query('SELECT pedido_id FROM facturas WHERE pedido_id IN (?)', [todos.map((p) => p.id)]);
         if (facturados.length > 0) throw Object.assign(new Error('Una de las comandas ya tiene comprobante y no se puede juntar.'), { status: 409 });
 
-        const base = pedidosDestino[0] || pedidosOrigen[0];
+        // Si el destino esta libre se le abre una comanda nueva (copia de la cabecera de la primera de origen): asi TODAS las
+        // mesas de origen quedan marcadas como unidas y siguen ocupadas hasta que se pague o se libere la cuenta.
+        let base = pedidosDestino[0];
+        if (!base) {
+            const columnas = `sede_id, cliente_id, usuario_id, estado, fecha_creacion${tieneDescuentos ? ', descuento_global_pct' : ''}`;
+            const [nuevo] = await connection.query(
+                `INSERT INTO pedidos (mesa_id, ${columnas}) SELECT ?, ${columnas} FROM pedidos WHERE id = ?`,
+                [destinoId, pedidosOrigen[0].id]
+            );
+            base = { id: nuevo.insertId, mesa_id: destinoId };
+        }
         const resto = todos.filter((p) => Number(p.id) !== Number(base.id));
-        if (Number(base.mesa_id) !== destinoId) await connection.query('UPDATE pedidos SET mesa_id = ? WHERE id = ?', [destinoId, base.id]);
         for (const pedido of resto) {
             await connection.query('UPDATE detalles_pedido SET pedido_id = ? WHERE pedido_id = ?', [base.id, pedido.id]);
             await connection.query("UPDATE pedidos SET estado = 'cancelado', total = 0, unido_a_pedido_id = ? WHERE id = ?", [base.id, pedido.id]);
+            await connection.query('UPDATE pedidos SET unido_a_pedido_id = ? WHERE unido_a_pedido_id = ?', [base.id, pedido.id]);
         }
 
         // The merged order shows the least advanced state of its lines.
-        const [lineas] = await connection.query('SELECT estado_comanda, subtotal FROM detalles_pedido WHERE pedido_id = ?', [base.id]);
-        const total = round2(lineas.reduce((acc, l) => acc + Number(l.subtotal), 0));
+        // Cada plato conserva su descuento; el descuento global que rige es el de la comanda base (la de la mesa destino).
+        const total = await recalcularPedido(connection, base.id);
+        const [lineas] = await connection.query('SELECT estado_comanda FROM detalles_pedido WHERE pedido_id = ?', [base.id]);
         const estado = lineas.some((l) => l.estado_comanda === 'pendiente') ? 'pendiente'
             : lineas.some((l) => l.estado_comanda === 'en_cocina') ? 'en_proceso' : 'listo';
         await connection.query('UPDATE pedidos SET total = ?, estado = ? WHERE id = ?', [total, estado, base.id]);
         await connection.commit();
-        res.json({ id: Number(base.id), mesa_id: destinoId, mesa_numero: numeroDe.get(destinoId), total, mesas_juntadas: origenIds.length, comandas_unidas: resto.length + 1 });
+        res.json({ id: Number(base.id), mesa_id: destinoId, mesa_numero: numeroDe.get(destinoId), total, mesas_juntadas: origenIds.length, comandas_unidas: todos.length });
     } catch (err) {
         await connection.rollback();
         res.status(err.status || 500).json({ error: err.message });
@@ -2672,12 +3039,13 @@ const publicEmpresaConfig = (config) => {
     };
 };
 
-const facturaScope = (req, alias) => (isSuperadmin(req)
+const facturaScope = (req, alias) => (isMultisede(req)
     ? { where: '1 = 1', params: [] }
     : { where: `${alias}.sede_id = ?`, params: [req.userContext.sedeUsuarioId] });
 
 const FACTURA_SELECT_SQL = `
-    SELECT f.id, f.sede_id, s.nombre AS sede_nombre, f.pedido_id, f.cliente_id, f.tipo_comprobante, f.serie, f.numero,
+    SELECT f.id, f.sede_id, s.nombre AS sede_nombre, f.pedido_id, (f.pedido_id IS NULL AND f.documento_origen_id IS NULL) AS es_libre,
+           f.cliente_id, f.tipo_comprobante, f.serie, f.numero,
            f.numero_comprobante, f.fecha_emision, DATE_FORMAT(f.fecha_emision, '%Y-%m-%d') AS fecha,
            DATE_FORMAT(f.fecha_emision, '%H:%i') AS hora, f.subtotal, f.impuesto, f.igv_porcentaje, f.total_venta,
            f.condicion_pago, DATE_FORMAT(f.fecha_vencimiento, '%Y-%m-%d') AS fecha_vencimiento, f.monto_cobrado,
@@ -2742,7 +3110,7 @@ const facturaItems = async (facturaId) => {
     if (!row) return [];
     if (row.items_snapshot) return typeof row.items_snapshot === 'string' ? JSON.parse(row.items_snapshot) : row.items_snapshot;
     const [detalles] = await pool.query(
-        `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, um.codigo_sunat AS unidad_sunat
+        `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, dp.subtotal AS total_neto, um.codigo_sunat AS unidad_sunat
          FROM detalles_pedido dp
          LEFT JOIN productos pr ON pr.id = dp.producto_id
          LEFT JOIN unidades_medida um ON um.id = pr.unidad_id
@@ -2758,18 +3126,25 @@ const calcularLineas = (detalles, tasa) => {
     const items = detalles.map((d) => {
         const cantidad = Number(d.cantidad);
         const precio = Number(d.precio_unitario);
-        const total = round2(cantidad * precio);
+        const lista = round2(cantidad * precio);
+        // Una linea con descuento trae su importe neto (total_neto): ese es el total cobrado. precio_unitario pasa a ser el
+        // precio neto por unidad (asi una nota de credito por item devuelve lo realmente cobrado) y se guarda el de lista.
+        const neto = d.total_neto !== undefined && d.total_neto !== null ? round2(d.total_neto) : lista;
+        const conDescuento = neto < lista;
+        const total = conDescuento ? neto : lista;
         const subtotal = round2(total / factor);
+        const precioNeto = conDescuento && cantidad > 0 ? Math.round((neto / cantidad) * 1e4) / 1e4 : precio;
         return {
             producto_id: d.producto_id,
             descripcion: String(d.descripcion || `Producto ${d.producto_id}`).slice(0, 250),
             unidad_sunat: d.unidad_sunat || 'NIU',
             cantidad,
-            precio_unitario: precio,
-            valor_unitario: Math.round((precio / factor) * 1e10) / 1e10,
+            precio_unitario: precioNeto,
+            valor_unitario: Math.round((precioNeto / factor) * 1e10) / 1e10,
             subtotal,
             igv: round2(total - subtotal),
-            total
+            total,
+            ...(conDescuento ? { precio_lista: precio, descuento: round2((lista - neto) / factor) } : {})
         };
     });
     const total = round2(items.reduce((sum, item) => sum + item.total, 0));
@@ -2781,11 +3156,16 @@ const calcularLineas = (detalles, tasa) => {
         const mayor = items.reduce((max, item) => (item.total > max.total ? item : max), items[0]);
         mayor.subtotal = round2(mayor.subtotal + ajuste);
         mayor.igv = round2(mayor.total - mayor.subtotal);
+        // Con descuento, valor x cantidad - descuento = subtotal: el descuento absorbe la misma diferencia.
+        if (mayor.descuento) mayor.descuento = round2(mayor.descuento - ajuste);
     }
     return { items, gravada, igv: round2(total - gravada), total };
 };
 
 const ddmmyyyy = (ymd) => ymd.split('-').reverse().join('-');
+
+/** SUNAT item code: products P<id>; free-invoice lines (negative id) L<line>. */
+const codigoLinea = (item) => item.codigo || (Number(item.producto_id) > 0 ? `P${item.producto_id}` : `L${Math.abs(Number(item.producto_id) || 0)}`);
 
 const buildComprobantePayload = ({ tipo, serie, numero, cliente, fecha, condicion, fechaVencimiento, metodo, tasa, calc, observacion }) => {
     const payload = {
@@ -2812,12 +3192,13 @@ const buildComprobantePayload = ({ tipo, serie, numero, cliente, fecha, condicio
         observaciones: observacion || '',
         items: calc.items.map((item) => ({
             unidad_de_medida: item.unidad_sunat || 'NIU',
-            codigo: `P${item.producto_id}`,
+            codigo: codigoLinea(item),
             descripcion: item.descripcion,
             cantidad: item.cantidad,
-            valor_unitario: item.valor_unitario,
-            precio_unitario: item.precio_unitario,
-            descuento: '',
+            // Con descuento se declara el precio de lista y el descuento (sin IGV): valor x cantidad - descuento = subtotal.
+            valor_unitario: item.descuento ? Math.round((item.precio_lista / (1 + tasa / 100)) * 1e10) / 1e10 : item.valor_unitario,
+            precio_unitario: item.descuento ? item.precio_lista : item.precio_unitario,
+            descuento: item.descuento || '',
             subtotal: item.subtotal,
             tipo_de_igv: 1,
             igv: item.igv,
@@ -3150,7 +3531,7 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
         if (order.estado === 'cancelado') throw new FacturacionError(409, 'No se puede facturar un pedido cancelado');
 
         const [detalles] = await connection.query(
-            `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, um.codigo_sunat AS unidad_sunat
+            `SELECT dp.producto_id, pr.nombre AS descripcion, dp.cantidad, dp.precio_unitario, dp.subtotal AS total_neto, um.codigo_sunat AS unidad_sunat
              FROM detalles_pedido dp
              LEFT JOIN productos pr ON pr.id = dp.producto_id
              LEFT JOIN unidades_medida um ON um.id = pr.unidad_id
@@ -3221,6 +3602,161 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
     try {
         const config = await getEmpresaConfig();
         // Sin la casilla "Enviar a SUNAT" el comprobante queda pendiente: se envia despues desde Comprobantes emitidos.
+        if (TIPOS_ELECTRONICOS.includes(tipo) && Number(config.envio_automatico) && body.enviar_sunat !== false) await procesarSunat(facturaId, 'enviar');
+    } catch (err) {
+        envioError = err.message;
+    }
+    const detalle = await findFacturaDetalle(req, facturaId);
+    res.status(201).json({ ...detalle, total: detalle.total_venta, envio_error: envioError });
+});
+
+// --- Factura libre ---
+// Boleta, factura o nota de venta con items escritos a mano: sin pedido, sin stock y sin delivery. Usa las mismas series,
+// IGV, SUNAT, cobros y Cuentas por cobrar que una venta normal. Al contado se registra el cobro SIN pasar por la caja
+// (sesion_id NULL); al credito queda con fecha de vencimiento unica y se cobra desde Cuentas por cobrar.
+const LIBRE_MAX_ITEMS = 100;
+const LIBRE_MAX_TOTAL = 99999999;
+const textoLibre = (valor, max) => String(valor ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+
+// Datos que el formulario necesita para mostrar totales (el cajero no puede leer la configuracion completa).
+app.get('/api/facturas/libre/opciones', allowAdminOrCashier, async (req, res) => {
+    try {
+        const config = await getEmpresaConfig();
+        res.json({ igv_porcentaje: Number(config.igv_porcentaje) || 10.5, limite_boleta_anonima: BOLETA_LIMITE_ANONIMO });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/facturas/libre', allowAdminOrCashier, requireSede, async (req, res) => {
+    const body = req.body || {};
+    const tipo = String(body.tipo_comprobante || '').trim().toLowerCase();
+    const condicion = String(body.condicion_pago || 'contado').trim().toLowerCase();
+    const cliente = parseClienteInput(body.cliente);
+    const metodo = String(body.pago?.metodo_pago || '').trim().toLowerCase();
+    const referencia = String(body.pago?.referencia || '').trim().slice(0, 100) || null;
+    const fechaVencimiento = String(body.fecha_vencimiento || '').trim();
+    const observacion = String(body.observacion || '').trim().slice(0, 255) || null;
+    const incluyeIgv = body.precios_incluyen_igv !== false;
+    const sedeId = sedeOf(req);
+    const hoy = todayLocal();
+
+    const errors = [];
+    if (!TIPOS_COMPROBANTE.includes(tipo)) errors.push('El comprobante debe ser boleta, factura o nota de venta');
+    if (!['contado', 'credito'].includes(condicion)) errors.push('La condicion de pago debe ser contado o credito');
+    if (condicion === 'contado' && !METODOS_COBRO.includes(metodo)) errors.push('Seleccione el metodo de pago');
+    if (condicion === 'credito') {
+        if (!isRealDate(fechaVencimiento) || fechaVencimiento <= hoy) errors.push('La fecha de vencimiento del credito debe ser posterior a hoy');
+        if (cliente.tipo_doc === '-') errors.push('Una venta al credito requiere identificar al cliente');
+    }
+    const entrada = Array.isArray(body.items) ? body.items : [];
+    if (entrada.length === 0 || entrada.length > LIBRE_MAX_ITEMS) errors.push(`Agregue entre 1 y ${LIBRE_MAX_ITEMS} items`);
+    const items = [];
+    entrada.slice(0, LIBRE_MAX_ITEMS).forEach((item, index) => {
+        const descripcion = textoLibre(item?.descripcion, 250);
+        const cantidad = Math.round(Number(item?.cantidad) * 1000) / 1000;
+        const precio = Math.round(Number(item?.precio_unitario) * 10000) / 10000;
+        if (descripcion.length < 3) errors.push(`Item ${index + 1}: ingrese la descripcion (minimo 3 caracteres)`);
+        else if (!(cantidad > 0) || cantidad > 999999) errors.push(`Item ${index + 1}: la cantidad debe ser mayor a 0`);
+        else if (!(precio > 0) || precio > LIBRE_MAX_TOTAL) errors.push(`Item ${index + 1}: el precio debe ser mayor a 0`);
+        else items.push({ descripcion, cantidad, precio });
+    });
+    if (errors.length > 0) return res.status(400).json({ error: errors.join('. ') });
+
+    const connection = await pool.getConnection();
+    let facturaId;
+    try {
+        await connection.beginTransaction();
+
+        const docError = validarDocumentoCliente(cliente);
+        if (docError) throw new FacturacionError(400, docError);
+        if (tipo === 'factura' && cliente.tipo_doc !== 'RUC') throw new FacturacionError(400, 'La factura requiere el RUC del cliente');
+        if (tipo === 'boleta' && !['-', 'DNI'].includes(cliente.tipo_doc)) throw new FacturacionError(400, 'La boleta se emite con DNI del cliente (o sin documento). Para un cliente con RUC emita una factura');
+        if (tipo === 'factura' && !cliente.direccion) throw new FacturacionError(400, 'Ingrese la direccion fiscal del cliente');
+
+        const config = await getEmpresaConfig(connection);
+        if (!config.razon_social) throw new FacturacionError(409, 'Configure los datos de la empresa en Configuracion > Facturacion electronica');
+        const electronico = TIPOS_ELECTRONICOS.includes(tipo);
+        if (electronico) {
+            if (!config.ruc) throw new FacturacionError(409, 'Configure el RUC de la empresa en Configuracion > Facturacion electronica');
+            facturacion.validarCredenciales(config);
+        }
+
+        const [corrRows] = await connection.query(
+            'SELECT serie, siguiente_numero FROM correlativos WHERE tipo = ? AND sede_id = ? FOR UPDATE',
+            [tipo, sedeId]
+        );
+        if (corrRows.length === 0) throw new FacturacionError(409, `No hay serie configurada para ${tipo.replace('_', ' ')} en esta sede`);
+        const { serie, siguiente_numero: numero } = corrRows[0];
+        if (!SERIE_REGEX[tipo].test(serie)) {
+            throw new FacturacionError(409, `La serie ${serie} no es valida para ${tipo}: debe ser ${tipo === 'factura' ? 'Fxxx' : 'Bxxx'} (4 caracteres)`);
+        }
+
+        // calcularLineas works with prices that include IGV: a price without IGV is raised first. Free lines use negative ids (-1, -2...)
+        // so a credit note can still point at each line.
+        const tasa = Number(config.igv_porcentaje) || 10.5;
+        const factor = 1 + tasa / 100;
+        const detalles = items.map((item, index) => ({
+            producto_id: -(index + 1),
+            descripcion: item.descripcion,
+            cantidad: item.cantidad,
+            precio_unitario: incluyeIgv ? item.precio : Math.round(item.precio * factor * 10000) / 10000,
+            unidad_sunat: 'NIU'
+        }));
+        const calc = calcularLineas(detalles, tasa);
+        if (!(calc.total > 0)) throw new FacturacionError(409, 'El total del comprobante debe ser mayor a 0');
+        if (calc.total > LIBRE_MAX_TOTAL) throw new FacturacionError(400, 'El total del comprobante es demasiado alto');
+        if (tipo === 'boleta' && calc.total >= BOLETA_LIMITE_ANONIMO && cliente.tipo_doc === '-') {
+            throw new FacturacionError(400, `Una boleta desde S/ ${BOLETA_LIMITE_ANONIMO} debe identificar al cliente (DNI)`);
+        }
+
+        const clienteId = (await upsertCliente(connection, cliente)) || null;
+        const [sedeRows] = await connection.query('SELECT direccion, telefono FROM sedes WHERE id = ?', [sedeId]);
+        const empresaSnapshot = {
+            ruc: config.ruc, razon_social: config.razon_social, nombre_comercial: config.nombre_comercial,
+            direccion: sedeRows[0]?.direccion || config.direccion, telefono: sedeRows[0]?.telefono || config.telefono
+        };
+        const payload = electronico
+            ? buildComprobantePayload({ tipo, serie, numero, cliente, fecha: hoy, condicion, fechaVencimiento, metodo, tasa, calc, observacion })
+            : null;
+
+        const [result] = await connection.query(
+            `INSERT INTO facturas
+                (sede_id, pedido_id, cliente_id, tipo_comprobante, numero_comprobante, serie, numero, subtotal, igv_porcentaje,
+                 total_venta, impuesto, sesion_caja_id, condicion_pago, fecha_vencimiento, monto_cobrado, cliente_tipo_doc,
+                 cliente_num_doc, cliente_nombre, cliente_direccion, observacion, usuario_id, estado_sunat, ambiente,
+                 nubefact_payload, empresa_snapshot, items_snapshot)
+             VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [sedeId, clienteId, tipo, `${serie}-${String(numero).padStart(8, '0')}`, serie, numero, calc.gravada, tasa,
+                calc.total, calc.igv, condicion, condicion === 'credito' ? fechaVencimiento : null,
+                condicion === 'contado' ? calc.total : 0, cliente.tipo_doc, cliente.num_doc, cliente.nombre || 'CLIENTES VARIOS',
+                cliente.direccion, observacion, req.userContext.id, electronico ? 'pendiente' : 'no_aplica',
+                electronico ? config.nubefact_ambiente : null, payload ? JSON.stringify(payload) : null,
+                JSON.stringify(empresaSnapshot), JSON.stringify(calc.items)]
+        );
+        facturaId = result.insertId;
+
+        if (condicion === 'contado') {
+            // Without a caja session: the collection is registered but never enters a cash count.
+            await connection.query(
+                `INSERT INTO cobros_venta (factura_id, sede_id, monto, metodo_pago, referencia, sesion_id, usuario_id)
+                 VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+                [facturaId, sedeId, calc.total, metodo, referencia, req.userContext.id]
+            );
+        }
+        await connection.query('UPDATE correlativos SET siguiente_numero = siguiente_numero + 1 WHERE tipo = ? AND sede_id = ?', [tipo, sedeId]);
+        await connection.commit();
+    } catch (err) {
+        await connection.rollback();
+        connection.release();
+        return sendFacturacionError(res, err);
+    }
+    connection.release();
+
+    // The receipt is already issued; a sending problem is reported but never undoes it.
+    let envioError = null;
+    try {
+        const config = await getEmpresaConfig();
         if (TIPOS_ELECTRONICOS.includes(tipo) && Number(config.envio_automatico) && body.enviar_sunat !== false) await procesarSunat(facturaId, 'enviar');
     } catch (err) {
         envioError = err.message;
@@ -3467,8 +4003,10 @@ app.post('/api/facturas/:id/notas', allowAdmin, async (req, res) => {
         if (devolver > 0) {
             const metodo = String(body.devolucion?.metodo_pago || '').trim().toLowerCase();
             if (!METODOS_COBRO.includes(metodo)) throw new FacturacionError(400, `El cliente ya pago: indique como se le devuelven S/ ${devolver.toFixed(2)}`);
-            const sesionId = await openCashSession(connection, origen.sede_id);
-            if (metodo === 'efectivo') {
+            // A free invoice was never collected through a caja, so its refund does not go through one either.
+            const esLibre = !origen.pedido_id;
+            const sesionId = esLibre ? null : await openCashSession(connection, origen.sede_id);
+            if (metodo === 'efectivo' && !esLibre) {
                 if (!sesionId) throw new FacturacionError(409, 'Para devolver en efectivo abra la caja de la sede');
                 const summary = await buildCashSessionSummary(connection, sesionId, origen.sede_id);
                 if (devolver > Number(summary.resumen.monto_teorico)) {
@@ -3515,7 +4053,7 @@ app.post('/api/facturas/:id/notas', allowAdmin, async (req, res) => {
             enviar_automaticamente_al_cliente: false,
             items: calc.items.map((item) => ({
                 unidad_de_medida: item.codigo === 'AJUSTE' ? 'ZZ' : item.unidad_sunat || 'NIU',
-                codigo: item.codigo || `P${item.producto_id}`,
+                codigo: codigoLinea(item),
                 descripcion: item.descripcion,
                 cantidad: item.cantidad,
                 valor_unitario: item.valor_unitario,
@@ -3593,9 +4131,18 @@ app.post('/api/facturas/:id/notas', allowAdmin, async (req, res) => {
 app.post('/api/precuenta/ticket', allowAdminWaiterCashier, requireSede, async (req, res) => {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const clean = items
-        .map((item) => ({ descripcion: String(item?.descripcion || '').slice(0, 120), cantidad: Number(item?.cantidad), precio: Number(item?.precio) }))
+        .map((item) => {
+            const cantidad = Number(item?.cantidad);
+            const precio = Number(item?.precio);
+            const pct = Number(item?.descuento_pct) > 0 && Number(item.descuento_pct) <= 100 ? Number(item.descuento_pct) : 0;
+            return { descripcion: String(item?.descripcion || '').slice(0, 120), cantidad, precio, descuento_pct: pct };
+        })
         .filter((item) => item.descripcion && item.cantidad > 0 && item.precio >= 0);
     if (clean.length === 0) return res.status(400).json({ error: 'La pre-cuenta no tiene productos' });
+    // El importe de cada linea sale del mismo calculo que la comanda (descuento por plato y global).
+    let globalPct = 0;
+    try { globalPct = parsePct(req.body?.descuento_global_pct); } catch { globalPct = 0; }
+    for (const item of clean) item.importe = montoNeto(item.precio, item.cantidad, item.descuento_pct, globalPct);
     try {
         const config = await getEmpresaConfig();
         const [sedeRows] = await pool.query('SELECT direccion FROM sedes WHERE id = ?', [sedeOf(req)]);
@@ -3603,7 +4150,8 @@ app.post('/api/precuenta/ticket', allowAdminWaiterCashier, requireSede, async (r
         const html = formatos.preCuentaHtml({
             mesa: String(req.body?.mesa || '-').slice(0, 20),
             items: clean,
-            total: round2(clean.reduce((sum, item) => sum + item.cantidad * item.precio, 0)),
+            total: round2(clean.reduce((sum, item) => sum + item.importe, 0)),
+            descuento_global_pct: globalPct,
             fecha: now[0].fecha,
             hora: now[0].hora,
             mozo: req.userContext.nombre
@@ -3759,14 +4307,24 @@ const restituirStockVenta = async (connection, factura, usuarioId, { cantidades 
          WHERE motivo = 'venta' AND tipo_item = 'producto' AND sede_id = ? AND detalle = ? AND cantidad < 0`,
         [factura.sede_id, `Comprobante ${factura.numero_comprobante}`]
     );
-    // `cantidades` (producto_id -> unidades) limits the return to what a credit note by item gives back; without it everything returns.
-    const pendientes = cantidades ? { ...cantidades } : null;
+    // `cantidades` (producto_id -> unidades vendidas) limits the return to what a credit note by item gives back; without it everything
+    // returns. The movements are in stock units, so the units sold are converted with the product's factor_venta.
+    let pendientes = null;
+    if (cantidades) {
+        pendientes = {};
+        const ids = Object.keys(cantidades).map(Number).filter((id) => id > 0);
+        const [factores] = ids.length
+            ? await connection.query(`SELECT id, ${tieneFactorVenta ? 'factor_venta' : '1 AS factor_venta'} FROM productos WHERE id IN (?)`, [ids])
+            : [[]];
+        const factorDe = new Map(factores.map((f) => [Number(f.id), Number(f.factor_venta) || 1]));
+        for (const id of ids) pendientes[id] = Math.round(Number(cantidades[id]) * (factorDe.get(id) || 1) * 1000) / 1000;
+    }
     for (const salida of salidas) {
         let cantidad = Number(salida.cantidad);
         if (pendientes) {
             cantidad = Math.min(cantidad, Number(pendientes[salida.item_id]) || 0);
             if (cantidad <= 0) continue;
-            pendientes[salida.item_id] -= cantidad;
+            pendientes[salida.item_id] = Math.round((pendientes[salida.item_id] - cantidad) * 1000) / 1000;
         }
         await adjustStockAlmacen(connection, 'producto', salida.almacen_id, factura.sede_id, salida.item_id, cantidad);
         await registrarMovimiento(connection, {
@@ -3898,7 +4456,7 @@ const RESERVA_SELECT_SQL = `
 `;
 
 // The superadmin manages reservations of every sede; the rest only those of their own sede.
-const reservaScope = (req) => (isSuperadmin(req)
+const reservaScope = (req) => (isMultisede(req)
     ? { where: '1 = 1', params: [] }
     : { where: 'r.sede_id = ?', params: [req.userContext.sedeUsuarioId] });
 
@@ -3996,7 +4554,7 @@ app.get('/api/reservas', allowReservations, async (req, res) => {
     }
 
     let sedeFilter;
-    if (isSuperadmin(req)) {
+    if (isMultisede(req)) {
         sedeFilter = sede_id === 'todas' ? null : (Number(sede_id) || sedeOf(req));
         if (sede_id !== 'todas' && !sedeFilter) {
             return res.status(400).json({ error: 'Seleccione una sede para continuar' });
@@ -4241,13 +4799,13 @@ const PAGO_GASTO_SELECT_SQL = `
 `;
 
 // The superadmin manages expenses of every sede; the rest only those of their own sede.
-const gastoScope = (req, alias) => (isSuperadmin(req)
+const gastoScope = (req, alias) => (isMultisede(req)
     ? { where: '1 = 1', params: [] }
     : { where: `${alias}.sede_id = ?`, params: [req.userContext.sedeUsuarioId] });
 
 /** Sede to list: superadmin may pick one or "todas"; everybody else only sees their own. */
 const resolveListSede = (req) => {
-    if (!isSuperadmin(req)) return { sedeFilter: req.userContext.sedeUsuarioId };
+    if (!isMultisede(req)) return { sedeFilter: req.userContext.sedeUsuarioId };
     const { sede_id: sedeId } = req.query;
     if (sedeId === 'todas') return { sedeFilter: null };
     const sedeFilter = Number(sedeId) || sedeOf(req);
@@ -4833,7 +5391,7 @@ const sendEquipoError = (res, err) => {
     return res.status(500).json({ error: err.message });
 };
 
-const equipoScope = (req, alias) => (isSuperadmin(req)
+const equipoScope = (req, alias) => (isMultisede(req)
     ? { where: '1 = 1', params: [] }
     : { where: `${alias}.sede_id = ?`, params: [req.userContext.sedeUsuarioId] });
 
@@ -5497,7 +6055,7 @@ const unidadSunat = (unidad) => {
     return 'NIU';
 };
 
-const sedeVisible = (req, sedeId) => isSuperadmin(req) || Number(sedeId) === Number(req.userContext.sedeUsuarioId);
+const sedeVisible = (req, sedeId) => isMultisede(req) || Number(sedeId) === Number(req.userContext.sedeUsuarioId);
 
 const ALMACEN_SELECT_SQL = `
     SELECT a.id, a.sede_id, s.nombre AS sede_nombre, a.codigo, a.nombre, a.direccion, a.ubigeo, a.cod_establecimiento,
@@ -5634,7 +6192,7 @@ const stockDeAlmacen = async (connection, almacenId, soloDisponibles = false) =>
         [almacenId]
     );
     const [productos] = await connection.query(
-        `SELECT p.id AS item_id, 'producto' AS tipo_item, p.nombre AS descripcion, COALESCE(um.abreviatura, 'Unidad') AS unidad, sp.stock AS stock
+        `SELECT p.id AS item_id, 'producto' AS tipo_item, p.nombre AS descripcion, COALESCE(um.abreviatura, 'Unidad') AS unidad, COALESCE(um.permite_decimales, 0) AS decimales, sp.stock AS stock
          FROM stock_productos sp JOIN productos p ON p.id = sp.producto_id
          LEFT JOIN unidades_medida um ON um.id = p.unidad_id
          WHERE sp.almacen_id = ? ${soloDisponibles ? 'AND sp.stock > 0' : 'AND sp.stock <> 0'} ORDER BY p.nombre`,
@@ -5686,7 +6244,7 @@ const TRANSFERENCIA_SELECT_SQL = `
     LEFT JOIN usuarios ur ON ur.id = t.recibido_por
 `;
 
-const transferenciaScope = (req) => (isSuperadmin(req)
+const transferenciaScope = (req) => (isMultisede(req)
     ? { where: '1 = 1', params: [] }
     : { where: '(t.sede_origen_id = ? OR t.sede_destino_id = ?)', params: [req.userContext.sedeUsuarioId, req.userContext.sedeUsuarioId] });
 
@@ -5700,8 +6258,16 @@ const findTransferencia = async (connection, req, id, lock = false) => {
 };
 
 const detalleTransferencia = async (connection, id) => {
-    const [rows] = await connection.query('SELECT * FROM transferencia_detalle WHERE transferencia_id = ? ORDER BY id', [id]);
-    return rows.map((row) => ({ ...row, cantidad: Number(row.cantidad), cantidad_recibida: row.cantidad_recibida === null ? null : Number(row.cantidad_recibida) }));
+    // `decimales`: whether the quantity of the line may have decimals (products follow their unit; supplies always do).
+    const [rows] = await connection.query(
+        `SELECT td.*, CASE WHEN td.tipo_item = 'producto' THEN COALESCE(um.permite_decimales, 0) WHEN td.tipo_item = 'equipo' THEN 0 ELSE 1 END AS decimales
+         FROM transferencia_detalle td
+         LEFT JOIN productos p ON td.tipo_item = 'producto' AND p.id = td.item_id
+         LEFT JOIN unidades_medida um ON um.id = p.unidad_id
+         WHERE td.transferencia_id = ? ORDER BY td.id`,
+        [id]
+    );
+    return rows.map((row) => ({ ...row, decimales: Number(row.decimales) === 1, cantidad: Number(row.cantidad), cantidad_recibida: row.cantidad_recibida === null ? null : Number(row.cantidad_recibida) }));
 };
 
 /** Validates the lines against the catalog (descriptions and units are taken from it, never from the client). */
@@ -5729,11 +6295,11 @@ const prepararLineas = async (connection, almacenOrigenId, items) => {
             if (!rows[0]) throw new AlmacenError(400, 'Insumo no encontrado');
             lineas.push({ tipo_item: tipo, item_id: itemId, descripcion: rows[0].nombre, unidad: rows[0].unidad_medida || 'Unidad', cantidad });
         } else {
-            if (!Number.isInteger(cantidad)) throw new AlmacenError(400, 'Los productos se transfieren en unidades enteras');
             const [rows] = await connection.query(
-                "SELECT p.nombre, COALESCE(um.abreviatura, 'Unidad') AS unidad FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?", [itemId]
+                "SELECT p.nombre, COALESCE(um.abreviatura, 'Unidad') AS unidad, um.permite_decimales FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?", [itemId]
             );
             if (!rows[0]) throw new AlmacenError(400, 'Producto no encontrado');
+            if (esEntero('producto', rows[0]) && !Number.isInteger(cantidad)) throw new AlmacenError(400, `${rows[0].nombre} se transfiere en unidades enteras`);
             lineas.push({ tipo_item: tipo, item_id: itemId, descripcion: rows[0].nombre, unidad: rows[0].unidad, cantidad });
         }
     }
@@ -5882,7 +6448,6 @@ app.post('/api/inventario/movimientos', allowAdmin, async (req, res) => {
         if (!MOTIVOS_MANUALES[tipo]) throw new AlmacenError(400, 'Indique si es ingreso o egreso');
         if (!['insumo', 'producto'].includes(tipoItem) || !Number(itemId)) throw new AlmacenError(400, 'Item invalido');
         if (!(cantidad > 0)) throw new AlmacenError(400, 'La cantidad debe ser mayor a 0');
-        if (tipoItem === 'producto' && !Number.isInteger(cantidad)) throw new AlmacenError(400, 'Los productos se mueven en unidades enteras');
         if (!MOTIVOS_MANUALES[tipo][motivo]) throw new AlmacenError(400, 'Seleccione el motivo del movimiento');
 
         await connection.beginTransaction();
@@ -5890,8 +6455,11 @@ app.post('/api/inventario/movimientos', allowAdmin, async (req, res) => {
         if (!almacen || !sedeVisible(req, almacen.sede_id)) throw new AlmacenError(404, 'Almacen no encontrado');
         if (!Number(almacen.activo)) throw new AlmacenError(409, 'El almacen esta inactivo');
 
-        const [items] = await connection.query(`SELECT nombre FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} WHERE id = ?`, [itemId]);
+        const [items] = await connection.query(
+            `SELECT t.nombre, um.permite_decimales FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} t LEFT JOIN unidades_medida um ON um.id = t.unidad_id WHERE t.id = ?`, [itemId]
+        );
         if (!items[0]) throw new AlmacenError(404, 'Item no encontrado');
+        if (esEntero(tipoItem, items[0]) && !Number.isInteger(cantidad)) throw new AlmacenError(400, `${items[0].nombre} se mueve en unidades enteras`);
 
         const delta = tipo === 'ingreso' ? cantidad : -cantidad;
         if (tipo === 'egreso') {
@@ -5930,8 +6498,8 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
     const connection = await pool.getConnection();
     try {
         if (!['entrada', 'salida', 'ajuste'].includes(tipo)) throw new AlmacenError(400, 'Indique si es entrada, salida o ajuste');
-        // La referencia es opcional en entradas y salidas; en ajustes sigue siendo obligatoria.
-        if (referencia.length > 100 || (tipo === 'ajuste' && referencia.length < 3)) throw new AlmacenError(400, 'Ingrese la referencia (N° de guia, orden de compra o motivo)');
+        // La referencia es opcional en entradas, salidas y ajustes.
+        if (referencia.length > 100) throw new AlmacenError(400, 'La referencia admite hasta 100 caracteres');
         if (items.length === 0 || items.length > 100) throw new AlmacenError(400, 'Agregue entre 1 y 100 items al movimiento');
         const motivoTexto = tipo === 'ajuste' ? 'Ajuste de inventario' : MOTIVOS_MANUALES[tipo === 'entrada' ? 'ingreso' : 'egreso'][motivoClave];
         if (!motivoTexto) throw new AlmacenError(400, 'Seleccione el motivo del movimiento');
@@ -5955,7 +6523,7 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
             const [catalogo] = await connection.query(
                 tipoItem === 'insumo'
                     ? 'SELECT i.nombre, i.costo_unitario, i.unidad_id, um.permite_decimales FROM insumos i LEFT JOIN unidades_medida um ON um.id = i.unidad_id WHERE i.id = ?'
-                    : 'SELECT nombre, unidad_id FROM productos WHERE id = ?',
+                    : `SELECT p.nombre, p.unidad_id, um.permite_decimales${tieneCostoProducto ? ', p.costo_unitario' : ''} FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?`,
                 [itemId]
             );
             if (!catalogo[0]) throw new AlmacenError(404, 'Un item del movimiento ya no existe en el catalogo');
@@ -5964,7 +6532,7 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
             const [filas] = await connection.query(`SELECT ${amount} AS stock FROM ${table} WHERE almacen_id = ? AND ${column} = ? FOR UPDATE`, [almacen.id, itemId]);
             const actual = Number(filas[0]?.stock || 0);
             // Adjustments count the stock unit; entries and exits may be typed in another unit that converts to it.
-            const entero = tipoItem === 'producto' || !Number(catalogo[0].permite_decimales ?? 1);
+            const entero = esEntero(tipoItem, catalogo[0]);
 
             let delta;
             let costoUnitario = null;
@@ -5989,13 +6557,19 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
                     if (costoIngresado !== null && !(costoIngresado >= 0)) throw new AlmacenError(400, `El costo de ${nombre} no es valido`);
                     // The cost is typed per unit of the line; the supply keeps it per stock unit.
                     const costo = costoIngresado === null ? null : Math.round((costoIngresado / linea.factor) * 10000) / 10000;
-                    if (tipoItem === 'insumo' && costo > 0) {
+                    if ((tipoItem === 'insumo' || tieneCostoProducto) && costo > 0) {
                         costoUnitario = costo;
-                        // Weighted average over the stock of the supply in every warehouse, before this entry.
-                        const [total] = await connection.query('SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?', [itemId]);
+                        // Weighted average over the stock of the item in every warehouse, before this entry.
+                        const [total] = await connection.query(tipoItem === 'insumo'
+                            ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
+                            : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
                         const previo = Math.max(0, Number(total[0].stock));
                         const promedio = previo > 0 ? ((previo * Number(catalogo[0].costo_unitario || 0)) + (cantidad * costo)) / (previo + cantidad) : costo;
-                        await connection.query('UPDATE insumos SET costo_unitario = ? WHERE id = ?', [round2(promedio), itemId]);
+                        // Supplies keep the cost with 2 decimals; products with 4 (a litre of beer costs a few cents per ml).
+                        await connection.query(
+                            `UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`,
+                            [tipoItem === 'insumo' ? round2(promedio) : Math.round(promedio * 10000) / 10000, itemId]
+                        );
                     }
                 }
             }
@@ -6198,7 +6772,12 @@ app.post('/api/transferencias/:id/recibir', allowAdminOrKitchenRecibir, async (r
             const motivo = textoOpcional(input?.motivo_diferencia, 200);
             if (!(recibida >= 0) || recibida > linea.cantidad) throw new AlmacenError(400, `Cantidad recibida invalida para ${linea.descripcion} (enviado ${linea.cantidad})`);
             if (linea.tipo_item === 'equipo' && ![0, 1].includes(recibida)) throw new AlmacenError(400, 'Un equipo se recibe completo (1) o no se recibe (0)');
-            if (linea.tipo_item === 'producto' && !Number.isInteger(recibida)) throw new AlmacenError(400, 'Los productos se reciben en unidades enteras');
+            if (linea.tipo_item === 'producto' && !Number.isInteger(recibida)) {
+                const [unidadProducto] = await connection.query(
+                    'SELECT um.permite_decimales FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id WHERE p.id = ?', [linea.item_id]
+                );
+                if (esEntero('producto', unidadProducto[0] || {})) throw new AlmacenError(400, `${linea.descripcion} se recibe en unidades enteras`);
+            }
             const diferencia = Math.round((linea.cantidad - recibida) * 1000) / 1000;
             if (diferencia > 0 && (!motivo || motivo.length < 3)) throw new AlmacenError(400, `Indique el motivo de la diferencia de ${linea.descripcion}`);
 
@@ -6267,7 +6846,7 @@ const GUIA_SELECT_SQL = `
     LEFT JOIN facturas f ON f.id = g.factura_id
 `;
 
-const guiaScope = (req) => (isSuperadmin(req) ? { where: '1 = 1', params: [] } : { where: 'g.sede_id = ?', params: [req.userContext.sedeUsuarioId] });
+const guiaScope = (req) => (isMultisede(req) ? { where: '1 = 1', params: [] } : { where: 'g.sede_id = ?', params: [req.userContext.sedeUsuarioId] });
 
 const findGuia = async (connection, req, id, lock = false) => {
     const scope = guiaScope(req);
@@ -6380,7 +6959,7 @@ app.get('/api/guias/remitente/:origen/:id/items', allowAdmin, requireSede, async
             const [previa] = await pool.query("SELECT id FROM guias WHERE factura_id = ? AND tipo = 'remitente' AND estado <> 'anulada' LIMIT 1", [factura.id]);
             if (previa.length) return res.status(409).json({ error: 'El comprobante ya tiene una guía remitente.' });
             items = (await facturaItems(factura.id)).map((item) => ({
-                codigo: `P${item.producto_id}`, descripcion: item.descripcion,
+                codigo: codigoLinea(item), descripcion: item.descripcion,
                 cantidad: Number(item.cantidad), unidad_medida: item.unidad_sunat || 'NIU'
             }));
         } else {
@@ -6552,7 +7131,7 @@ app.post('/api/guias/remitente', allowAdmin, requireSede, async (req, res) => {
             const [previa] = await connection.query("SELECT id FROM guias WHERE factura_id = ? AND tipo = 'remitente' AND estado <> 'anulada'", [factura.id]);
             if (previa.length > 0) throw new AlmacenError(409, 'El comprobante ya tiene una guia remitente');
             items = (await facturaItems(factura.id)).map((i) => ({
-                codigo: `P${i.producto_id}`, descripcion: i.descripcion, cantidad: Number(i.cantidad), unidad_medida: i.unidad_sunat || 'NIU'
+                codigo: codigoLinea(i), descripcion: i.descripcion, cantidad: Number(i.cantidad), unidad_medida: i.unidad_sunat || 'NIU'
             }));
             destinatario = { tipo: factura.cliente_tipo_doc === 'RUC' ? '6' : '1', numero: factura.cliente_num_doc, nombre: factura.cliente_nombre, direccion: llegada.direccion };
             refs = { factura_id: factura.id, almacen_id: await almacenPorDefecto(connection, sedeId, 'ventas'), motivo: '01', texto: `${factura.tipo_comprobante === 'factura' ? 'Factura' : 'Boleta'} ${factura.numero_comprobante}`, factura };
@@ -7061,8 +7640,8 @@ const rechazarDeliveryPorAnulacion = async (connection, pedidoId, numeroComproba
 
 const findDelivery = async (connection, req, id, lock = false) => {
     const [rows] = await connection.query(
-        `${DELIVERY_SELECT_SQL} WHERE pd.pedido_id = ? ${isSuperadmin(req) ? '' : 'AND pd.sede_id = ?'} LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
-        isSuperadmin(req) ? [id] : [id, sedeOf(req)]
+        `${DELIVERY_SELECT_SQL} WHERE pd.pedido_id = ? ${isMultisede(req) ? '' : 'AND pd.sede_id = ?'} LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
+        isMultisede(req) ? [id] : [id, sedeOf(req)]
     );
     return rows[0] || null;
 };
@@ -7321,8 +7900,8 @@ const cargarRecordatorios = async (connection, sedeFilter, extraWhere = '') => {
 
 const findRecordatorio = async (connection, req, id) => {
     const [rows] = await connection.query(
-        `${RECORDATORIO_SELECT_SQL} WHERE r.id = ? AND r.eliminado = 0 ${isSuperadmin(req) ? '' : 'AND r.sede_id = ?'} LIMIT 1`,
-        isSuperadmin(req) ? [id] : [id, sedeOf(req)]
+        `${RECORDATORIO_SELECT_SQL} WHERE r.id = ? AND r.eliminado = 0 ${isMultisede(req) ? '' : 'AND r.sede_id = ?'} LIMIT 1`,
+        isMultisede(req) ? [id] : [id, sedeOf(req)]
     );
     return rows[0] || null;
 };
@@ -7497,9 +8076,67 @@ const sincronizarSunatPendientes = async () => {
     }
 };
 
-app.listen(PORT, () => {
+// El stock de productos admite decimales (cerveza por litros): la columna era INT en bases antiguas. Idempotente.
+const asegurarStockDecimal = async () => {
+    try {
+        const [rows] = await pool.query(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_productos' AND COLUMN_NAME = 'stock'"
+        );
+        if (rows[0] && String(rows[0].DATA_TYPE).toLowerCase() !== 'decimal') {
+            await pool.query('ALTER TABLE stock_productos MODIFY stock DECIMAL(12,3) NOT NULL DEFAULT 0');
+            console.log('stock_productos.stock convertido a DECIMAL(12,3)');
+        }
+    } catch (err) {
+        console.error('No se pudo convertir el stock de productos a decimal:', err.message);
+    }
+    // Unidades de stock que descuenta cada unidad vendida (botella de 620 ml en un stock por litros: 0.62).
+    const [factor] = await pool.query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'productos' AND COLUMN_NAME = 'factor_venta'"
+    );
+    if (factor.length === 0) {
+        await pool.query('ALTER TABLE productos ADD COLUMN factor_venta DECIMAL(12,4) NOT NULL DEFAULT 1');
+        console.log('productos.factor_venta agregado');
+    }
+    tieneFactorVenta = true;
+
+    // Costo unitario de los productos (bebidas): se actualiza con el promedio ponderado de cada entrada con costo.
+    const [costo] = await pool.query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'productos' AND COLUMN_NAME = 'costo_unitario'"
+    );
+    if (costo.length === 0) {
+        await pool.query('ALTER TABLE productos ADD COLUMN costo_unitario DECIMAL(12,4) NOT NULL DEFAULT 0');
+        console.log('productos.costo_unitario agregado');
+    }
+    tieneCostoProducto = true;
+};
+
+// Descuento % por plato (detalles_pedido) y global (pedidos). Idempotente; hasta que existan las columnas el POS funciona sin descuentos.
+const asegurarDescuentos = async () => {
+    const falta = async (tabla, columna) => {
+        const [rows] = await pool.query(
+            'SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+            [tabla, columna]
+        );
+        return rows.length === 0;
+    };
+    if (await falta('detalles_pedido', 'descuento_pct')) {
+        await pool.query('ALTER TABLE detalles_pedido ADD COLUMN descuento_pct DECIMAL(5,2) NOT NULL DEFAULT 0');
+        console.log('detalles_pedido.descuento_pct agregado');
+    }
+    if (await falta('pedidos', 'descuento_global_pct')) {
+        await pool.query('ALTER TABLE pedidos ADD COLUMN descuento_global_pct DECIMAL(5,2) NOT NULL DEFAULT 0');
+        console.log('pedidos.descuento_global_pct agregado');
+    }
+    tieneDescuentos = true;
+};
+
+const iniciar = () => app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    permisos.iniciar();
+    asegurarDescuentos().catch((err) => console.error('No se pudieron preparar las columnas de descuento:', err.message));
+    asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();
-    setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref();
-});
+    setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref(); });
+if (require.main === module) iniciar();
+module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, cargarUnidadesSunat };

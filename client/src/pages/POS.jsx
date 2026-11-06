@@ -377,7 +377,7 @@ const POS = () => {
                                         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-6">
                                             {mesas.filter(m => m.zona_id === zona.id).map(mesa => {
                                                 // Mesa de origen de un "Juntar mesas": su cuenta vive en la mesa destino.
-                                                const destinoUnion = !mesa.ultimo_estado_pedido && mesa.unida_a_mesa_id
+                                                const destinoUnion = mesa.unida_a_mesa_id
                                                     ? mesas.find((m) => Number(m.id) === Number(mesa.unida_a_mesa_id)) : null;
                                                 const estadoMostrado = destinoUnion ? destinoUnion.ultimo_estado_pedido : mesa.ultimo_estado_pedido;
                                                 const statusInfo = getStatusDisplay(estadoMostrado);
@@ -704,7 +704,7 @@ const JuntarMesasModal = ({ mesas, tieneComanda, onClose, onDone }) => {
                     <select className="input" value={destinoId} onChange={(e) => { setDestinoId(e.target.value); setOrigenIds((prev) => prev.filter((id) => String(id) !== e.target.value)); }} required>
                         <option value="">Seleccione...</option>
                         {ordenadas.map((m) => {
-                            const unida = !m.ultimo_estado_pedido && Boolean(m.unida_a_mesa_id);
+                            const unida = Boolean(m.unida_a_mesa_id);
                             return <option key={m.id} value={m.id} disabled={unida}>Mesa {m.numero}{m.zona_nombre ? ` · ${m.zona_nombre}` : ''}{tieneComanda(m) ? ' · con comanda' : unida ? ' · unida a otra mesa' : ' · libre'}</option>;
                         })}
                     </select>
@@ -727,7 +727,7 @@ const JuntarMesasModal = ({ mesas, tieneComanda, onClose, onDone }) => {
                     </div>
                 </div>
                 {destino && !tieneComanda(destino) && origenIds.length > 0 && (
-                    <p className="text-xs text-gray-500">La Mesa {destino.numero} está libre: la comanda de la primera mesa elegida se muda allí y recibe las demás.</p>
+                    <p className="text-xs text-gray-500">La Mesa {destino.numero} está libre: recibe una sola cuenta con todas las comandas y las mesas elegidas quedan ocupadas como unidas hasta pagar o liberar.</p>
                 )}
                 <div className="flex gap-3 pt-1">
                     <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Cancelar</button>
