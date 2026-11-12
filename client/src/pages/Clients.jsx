@@ -1,15 +1,32 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Plus, Edit, Trash2, UserPlus, Mail, Phone, CreditCard, ChevronRight, X, Download } from 'lucide-react';
+import { Search, Edit, Trash2, UserPlus, Mail, Phone, CreditCard, ChevronRight, X, Download, Power, AlertTriangle } from 'lucide-react';
 import { descargarClientes } from '../utils/exportContactos';
 import { motion, AnimatePresence } from 'framer-motion';
+
+const FORM_VACIO = { nombre: '', telefono: '', email: '', tipo_documento: '', documento: '', direccion: '' };
+
+const leerError = async (response, porDefecto) => {
+    try {
+        const data = await response.json();
+        return data;
+    } catch {
+        return { error: porDefecto };
+    }
+};
 
 const Clients = () => {
     const [clients, setClients] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
+    const [verInactivos, setVerInactivos] = useState(false);
     const [showModal, setShowModal] = useState(false);
+    const [editingId, setEditingId] = useState(null);
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState('');
     const [exporting, setExporting] = useState(false);
-    const [formData, setFormData] = useState({ nombre: '', telefono: '', email: '', documento: '' });
+    const [formData, setFormData] = useState(FORM_VACIO);
+    // Aviso cuando el cliente no se puede eliminar por tener pedidos/comprobantes: { client, mensaje }
+    const [bloqueo, setBloqueo] = useState(null);
 
     useEffect(() => {
         fetchClients();
@@ -17,7 +34,7 @@ const Clients = () => {
 
     const fetchClients = async () => {
         try {
-            const response = await fetch('/api/clientes');
+            const response = await fetch('/api/clientes?todos=1');
             const data = await response.json();
             setClients(Array.isArray(data) ? data : []);
         } catch (error) {
@@ -28,21 +45,97 @@ const Clients = () => {
         }
     };
 
+    const abrirNuevo = () => {
+        setEditingId(null);
+        setFormData(FORM_VACIO);
+        setFormError('');
+        setShowModal(true);
+    };
+
+    const abrirEditar = (client) => {
+        setEditingId(client.id);
+        setFormData({
+            nombre: client.nombre || '',
+            telefono: client.telefono || '',
+            email: client.email || '',
+            tipo_documento: client.tipo_documento || '',
+            documento: client.documento || '',
+            direccion: client.direccion || ''
+        });
+        setFormError('');
+        setShowModal(true);
+    };
+
+    const cerrarModal = () => {
+        setShowModal(false);
+        setEditingId(null);
+        setFormData(FORM_VACIO);
+        setFormError('');
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
+        setSaving(true);
+        setFormError('');
         try {
-            const response = await fetch('/api/clientes', {
-                method: 'POST',
+            const response = await fetch(editingId ? `/api/clientes/${editingId}` : '/api/clientes', {
+                method: editingId ? 'PUT' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(formData)
             });
-            if (response.ok) {
-                fetchClients();
-                setShowModal(false);
-                setFormData({ nombre: '', telefono: '', email: '', documento: '' });
+            if (!response.ok) {
+                const data = await leerError(response, 'No se pudo guardar el cliente.');
+                setFormError(data.error || 'No se pudo guardar el cliente.');
+                return;
             }
+            await fetchClients();
+            cerrarModal();
         } catch (error) {
-            console.error('Error creating client:', error);
+            console.error('Error saving client:', error);
+            setFormError('No se pudo guardar el cliente.');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const cambiarEstado = async (client, activo) => {
+        try {
+            const response = await fetch(`/api/clientes/${client.id}/estado`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ activo })
+            });
+            if (!response.ok) {
+                const data = await leerError(response, 'No se pudo cambiar el estado del cliente.');
+                alert(data.error || 'No se pudo cambiar el estado del cliente.');
+                return;
+            }
+            setBloqueo(null);
+            await fetchClients();
+        } catch (error) {
+            console.error('Error changing client status:', error);
+            alert('No se pudo cambiar el estado del cliente.');
+        }
+    };
+
+    const eliminar = async (client) => {
+        if (!window.confirm(`¿Eliminar al cliente "${client.nombre}"? Esta acción no se puede deshacer.`)) return;
+        try {
+            const response = await fetch(`/api/clientes/${client.id}`, { method: 'DELETE' });
+            if (response.status === 409) {
+                const data = await leerError(response, 'El cliente tiene registros asociados. Solo se puede desactivar.');
+                setBloqueo({ client, mensaje: data.error || 'El cliente tiene registros asociados. Solo se puede desactivar.' });
+                return;
+            }
+            if (!response.ok) {
+                const data = await leerError(response, 'No se pudo eliminar el cliente.');
+                alert(data.error || 'No se pudo eliminar el cliente.');
+                return;
+            }
+            await fetchClients();
+        } catch (error) {
+            console.error('Error deleting client:', error);
+            alert('No se pudo eliminar el cliente.');
         }
     };
 
@@ -58,10 +151,13 @@ const Clients = () => {
         }
     };
 
+    const termino = searchTerm.toLowerCase();
     const filteredClients = clients.filter(client =>
-        client.nombre.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        client.documento.includes(searchTerm)
+        (verInactivos || Number(client.activo ?? 1) === 1) &&
+        (String(client.nombre || '').toLowerCase().includes(termino) ||
+            String(client.documento || '').includes(searchTerm))
     );
+    const totalInactivos = clients.filter(c => Number(c.activo ?? 1) === 0).length;
 
     return (
         <div className="space-y-10 animate-fade-in">
@@ -78,7 +174,7 @@ const Clients = () => {
                         <Download size={18} /> {exporting ? 'Generando...' : 'Excel'}
                     </button>
                     <button
-                        onClick={() => setShowModal(true)}
+                        onClick={abrirNuevo}
                         className="btn btn-primary"
                     >
                         <UserPlus size={18} /> Nuevo Cliente
@@ -101,8 +197,14 @@ const Clients = () => {
                             onChange={(e) => setSearchTerm(e.target.value)}
                         />
                     </div>
-                    <div className="flex items-center gap-2 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider bg-gray-50 px-4 py-2 rounded-xl border border-gray-100">
-                        Total: <span className="text-brand-600">{filteredClients.length}</span> Clientes
+                    <div className="flex flex-wrap items-center gap-3">
+                        <label className="flex items-center gap-2 text-xs font-bold text-[var(--text-secondary)] cursor-pointer select-none">
+                            <input type="checkbox" checked={verInactivos} onChange={(e) => setVerInactivos(e.target.checked)} />
+                            Ver desactivados ({totalInactivos})
+                        </label>
+                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider bg-gray-50 px-4 py-2 rounded-xl border border-gray-100">
+                            Total: <span className="text-brand-600">{filteredClients.length}</span> Clientes
+                        </div>
                     </div>
                 </div>
 
@@ -133,70 +235,93 @@ const Clients = () => {
                                     </td>
                                 </tr>
                             ) : (
-                                filteredClients.map((client, idx) => (
-                                    <motion.tr
-                                        initial={{ opacity: 0, y: 10 }}
-                                        animate={{ opacity: 1, y: 0 }}
-                                        transition={{ delay: idx * 0.05 }}
-                                        key={client.id}
-                                        className="hover:bg-brand-50/30 transition-colors group"
-                                    >
-                                        <td className="px-6 py-4">
-                                            <div className="flex items-center gap-4">
-                                                <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center font-bold text-brand-600 border border-gray-200 group-hover:bg-white transition-colors">
-                                                    {client.nombre.substring(0, 1)}
-                                                </div>
-                                                <div>
-                                                    <p className="font-black text-[var(--text-primary)] leading-none">{client.nombre}</p>
-                                                    <p className="text-[10px] text-brand-500 mt-1.5 font-bold uppercase tracking-widest">ID: #{client.id}</p>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            <div className="flex items-center justify-center gap-2 px-3 py-1.5 bg-gray-100/50 rounded-xl border border-gray-200/50 w-fit mx-auto">
-                                                <CreditCard size={14} className="text-[var(--text-muted)]" />
-                                                <span className="text-sm font-bold text-[var(--text-secondary)]">{client.documento || 'No definido'}</span>
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            <div className="flex flex-col gap-1.5 items-center">
-                                                {client.telefono && (
-                                                    <div className="flex items-center gap-2 text-xs font-bold text-[var(--text-secondary)]">
-                                                        <Phone size={12} className="text-brand-600" /> {client.telefono}
+                                filteredClients.map((client, idx) => {
+                                    const activo = Number(client.activo ?? 1) === 1;
+                                    return (
+                                        <motion.tr
+                                            initial={{ opacity: 0, y: 10 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            transition={{ delay: Math.min(idx, 20) * 0.03 }}
+                                            key={client.id}
+                                            className={`hover:bg-brand-50/30 transition-colors group ${activo ? '' : 'opacity-60'}`}
+                                        >
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center font-bold text-brand-600 border border-gray-200 group-hover:bg-white transition-colors">
+                                                        {String(client.nombre || '?').substring(0, 1)}
                                                     </div>
-                                                )}
-                                                {client.email && (
-                                                    <div className="flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
-                                                        <Mail size={12} /> {client.email}
+                                                    <div>
+                                                        <p className="font-black text-[var(--text-primary)] leading-none">{client.nombre}</p>
+                                                        <p className="text-[10px] text-brand-500 mt-1.5 font-bold uppercase tracking-widest">
+                                                            ID: #{client.id}
+                                                            {!activo && <span className="ml-2 px-2 py-0.5 rounded-md bg-gray-200 text-gray-600">Desactivado</span>}
+                                                        </p>
                                                     </div>
-                                                )}
-                                                {!client.telefono && !client.email && (
-                                                    <span className="text-xs text-[var(--text-muted)] font-medium">Sin datos de contacto</span>
-                                                )}
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            <div className="flex items-center justify-center gap-2">
-                                                <button className="p-2.5 hover:bg-white hover:text-brand-600 hover:shadow-sm rounded-xl transition-all text-[var(--text-muted)] border border-transparent hover:border-brand-100">
-                                                    <Edit size={16} />
-                                                </button>
-                                                <button className="p-2.5 hover:bg-white hover:text-red-600 hover:shadow-sm rounded-xl transition-all text-[var(--text-muted)] border border-transparent hover:border-red-100">
-                                                    <Trash2 size={16} />
-                                                </button>
-                                                <button className="p-2.5 hover:bg-white hover:text-brand-600 hover:shadow-sm rounded-xl transition-all text-[var(--text-muted)] border border-transparent hover:border-brand-100">
-                                                    <ChevronRight size={16} />
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </motion.tr>
-                                ))
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center justify-center gap-2 px-3 py-1.5 bg-gray-100/50 rounded-xl border border-gray-200/50 w-fit mx-auto">
+                                                    <CreditCard size={14} className="text-[var(--text-muted)]" />
+                                                    <span className="text-sm font-bold text-[var(--text-secondary)]">
+                                                        {client.documento ? `${client.tipo_documento ? client.tipo_documento + ' ' : ''}${client.documento}` : 'No definido'}
+                                                    </span>
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex flex-col gap-1.5 items-center">
+                                                    {client.telefono && (
+                                                        <div className="flex items-center gap-2 text-xs font-bold text-[var(--text-secondary)]">
+                                                            <Phone size={12} className="text-brand-600" /> {client.telefono}
+                                                        </div>
+                                                    )}
+                                                    {client.email && (
+                                                        <div className="flex items-center gap-2 text-xs font-medium text-[var(--text-muted)]">
+                                                            <Mail size={12} /> {client.email}
+                                                        </div>
+                                                    )}
+                                                    {!client.telefono && !client.email && (
+                                                        <span className="text-xs text-[var(--text-muted)] font-medium">Sin datos de contacto</span>
+                                                    )}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4">
+                                                <div className="flex items-center justify-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        title="Editar"
+                                                        onClick={() => abrirEditar(client)}
+                                                        className="p-2.5 hover:bg-white hover:text-brand-600 hover:shadow-sm rounded-xl transition-all text-[var(--text-muted)] border border-transparent hover:border-brand-100"
+                                                    >
+                                                        <Edit size={16} />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        title={activo ? 'Desactivar' : 'Activar'}
+                                                        onClick={() => cambiarEstado(client, !activo)}
+                                                        className={`p-2.5 hover:bg-white hover:shadow-sm rounded-xl transition-all border border-transparent ${activo ? 'text-[var(--text-muted)] hover:text-amber-600 hover:border-amber-100' : 'text-green-600 hover:border-green-100'}`}
+                                                    >
+                                                        <Power size={16} />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        title="Eliminar"
+                                                        onClick={() => eliminar(client)}
+                                                        className="p-2.5 hover:bg-white hover:text-red-600 hover:shadow-sm rounded-xl transition-all text-[var(--text-muted)] border border-transparent hover:border-red-100"
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </motion.tr>
+                                    );
+                                })
                             )}
                         </tbody>
                     </table>
                 </div>
             </div>
 
-            {/* Modal Rediseñado */}
+            {/* Modal Nuevo / Editar Cliente */}
             <AnimatePresence>
                 {showModal && (
                     <div className="fixed inset-0 bg-brand-950/20 flex items-center justify-center p-4 backdrop-blur-md z-50">
@@ -204,19 +329,19 @@ const Clients = () => {
                             initial={{ opacity: 0, scale: 0.9, y: 20 }}
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                            className="card w-full max-w-lg p-0 overflow-hidden shadow-3xl bg-white border-none"
+                            className="card w-full max-w-lg p-0 overflow-hidden shadow-3xl bg-white border-none max-h-[95vh] overflow-y-auto"
                         >
                             <div className="p-6 border-b border-gray-100 flex items-center justify-between bg-brand-50/30">
                                 <div className="flex items-center gap-4">
                                     <div className="w-12 h-12 bg-brand-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-brand-200">
-                                        <UserPlus size={24} />
+                                        {editingId ? <Edit size={24} /> : <UserPlus size={24} />}
                                     </div>
                                     <div>
-                                        <h3 className="text-xl font-display font-black tracking-tight">Nuevo Cliente</h3>
-                                        <p className="text-xs text-brand-600 font-bold uppercase tracking-widest">Información de Registro</p>
+                                        <h3 className="text-xl font-display font-black tracking-tight">{editingId ? 'Editar Cliente' : 'Nuevo Cliente'}</h3>
+                                        <p className="text-xs text-brand-600 font-bold uppercase tracking-widest">{editingId ? `Cliente #${editingId}` : 'Información de Registro'}</p>
                                     </div>
                                 </div>
-                                <button onClick={() => setShowModal(false)} className="p-2 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all text-gray-400">
+                                <button type="button" onClick={cerrarModal} className="p-2 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all text-gray-400">
                                     <X size={24} />
                                 </button>
                             </div>
@@ -225,19 +350,31 @@ const Clients = () => {
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div className="md:col-span-2">
                                         <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Nombre Completo</label>
-                                        <div className="relative">
-                                            <input
-                                                type="text"
-                                                className="input pl-4"
-                                                placeholder="Ej. Juan Pérez"
-                                                required
-                                                value={formData.nombre}
-                                                onChange={e => setFormData({ ...formData, nombre: e.target.value })}
-                                            />
-                                        </div>
+                                        <input
+                                            type="text"
+                                            className="input pl-4"
+                                            placeholder="Ej. Juan Pérez"
+                                            required
+                                            value={formData.nombre}
+                                            onChange={e => setFormData({ ...formData, nombre: e.target.value })}
+                                        />
                                     </div>
                                     <div>
-                                        <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Documento (DNI/RUC)</label>
+                                        <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Tipo de Documento</label>
+                                        <select
+                                            className="input"
+                                            value={formData.tipo_documento}
+                                            onChange={e => setFormData({ ...formData, tipo_documento: e.target.value })}
+                                        >
+                                            <option value="">Sin definir</option>
+                                            <option value="DNI">DNI</option>
+                                            <option value="RUC">RUC</option>
+                                            <option value="CE">Carné de extranjería</option>
+                                            <option value="PAS">Pasaporte</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Documento</label>
                                         <input
                                             type="text"
                                             className="input"
@@ -259,7 +396,7 @@ const Clients = () => {
                                             />
                                         </div>
                                     </div>
-                                    <div className="md:col-span-2">
+                                    <div>
                                         <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Email Principal</label>
                                         <input
                                             type="email"
@@ -269,17 +406,70 @@ const Clients = () => {
                                             onChange={e => setFormData({ ...formData, email: e.target.value })}
                                         />
                                     </div>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Dirección</label>
+                                        <input
+                                            type="text"
+                                            className="input"
+                                            placeholder="Av. / Jr. / Calle..."
+                                            value={formData.direccion}
+                                            onChange={e => setFormData({ ...formData, direccion: e.target.value })}
+                                        />
+                                    </div>
                                 </div>
+                                {formError && (
+                                    <p className="text-sm font-bold text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">{formError}</p>
+                                )}
                                 <div className="flex gap-4 pt-4">
-                                    <button type="button" onClick={() => setShowModal(false)} className="flex-1 btn btn-secondary py-4">
+                                    <button type="button" onClick={cerrarModal} className="flex-1 btn btn-secondary py-4">
                                         Cancelar
                                     </button>
-                                    <button type="submit" className="flex-[2] btn btn-primary py-4 shadow-xl shadow-brand-200 group">
-                                        <span>Registrar Cliente</span>
+                                    <button type="submit" disabled={saving} className="flex-[2] btn btn-primary py-4 shadow-xl shadow-brand-200 group">
+                                        <span>{saving ? 'Guardando...' : editingId ? 'Guardar Cambios' : 'Registrar Cliente'}</span>
                                         <ChevronRight size={18} className="group-hover:translate-x-1 transition-transform" />
                                     </button>
                                 </div>
                             </form>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
+            {/* Aviso: el cliente tiene referencias y solo se puede desactivar */}
+            <AnimatePresence>
+                {bloqueo && (
+                    <div className="fixed inset-0 bg-brand-950/20 flex items-center justify-center p-4 backdrop-blur-md z-50">
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                            className="card w-full max-w-md bg-white border-none shadow-3xl"
+                        >
+                            <div className="flex items-start gap-4">
+                                <div className="w-12 h-12 shrink-0 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-600">
+                                    <AlertTriangle size={24} />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-display font-black tracking-tight">No se puede eliminar</h3>
+                                    <p className="text-sm font-bold text-[var(--text-primary)] mt-1">{bloqueo.client.nombre}</p>
+                                    <p className="text-sm text-[var(--text-secondary)] mt-2">{bloqueo.mensaje}</p>
+                                    <p className="text-xs text-[var(--text-muted)] mt-2">Al desactivarlo deja de aparecer al facturar o registrar deliverys, pero se conserva su historial. Puede reactivarlo cuando quiera.</p>
+                                </div>
+                            </div>
+                            <div className="flex gap-3 pt-6">
+                                <button type="button" onClick={() => setBloqueo(null)} className="flex-1 btn btn-secondary">
+                                    Cancelar
+                                </button>
+                                {Number(bloqueo.client.activo ?? 1) === 1 ? (
+                                    <button type="button" onClick={() => cambiarEstado(bloqueo.client, false)} className="flex-1 btn btn-primary">
+                                        <Power size={16} /> Desactivar
+                                    </button>
+                                ) : (
+                                    <button type="button" onClick={() => setBloqueo(null)} className="flex-1 btn btn-primary">
+                                        Entendido
+                                    </button>
+                                )}
+                            </div>
                         </motion.div>
                     </div>
                 )}

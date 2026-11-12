@@ -662,9 +662,13 @@ app.delete('/api/usuarios/:id', allowAdmin, async (req, res) => {
 });
 
 // --- Clientes (compartidos entre sedes) ---
+// Por defecto solo los activos (selectores de facturacion, delivery, etc.); ?todos=1 incluye los desactivados (pantalla Clientes).
+// Hasta que exista clientes.activo (se crea al iniciar) se listan todos.
+let tieneClienteActivo = false;
 app.get('/api/clientes', allowAnyProfile, async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM clientes');
+        const todos = req.query.todos === '1' || !tieneClienteActivo;
+        const [rows] = await pool.query(`SELECT * FROM clientes ${todos ? '' : 'WHERE activo = 1'} ORDER BY nombre`);
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -747,6 +751,66 @@ app.post('/api/clientes', allowAdminWaiterCashier, async (req, res) => {
         );
         res.json({ ...req.body, id: result.insertId });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/clientes/:id', allowAdminWaiterCashier, async (req, res) => {
+    const nombre = String(req.body.nombre ?? '').trim().slice(0, 200);
+    if (!nombre) return res.status(400).json({ error: 'El nombre del cliente es obligatorio' });
+    const texto = (valor, max) => String(valor ?? '').trim().slice(0, max) || null;
+    const tipoDocumento = ['DNI', 'RUC', 'CE', 'PAS'].includes(req.body.tipo_documento) ? req.body.tipo_documento : null;
+    try {
+        const [result] = await pool.query(
+            'UPDATE clientes SET nombre = ?, telefono = ?, email = ?, documento = ?, tipo_documento = ?, direccion = ? WHERE id = ?',
+            [nombre, texto(req.body.telefono, 30), texto(req.body.email, 150), texto(req.body.documento, 20), tipoDocumento, texto(req.body.direccion, 255), req.params.id]
+        );
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Cliente no encontrado' });
+        res.json({ message: 'Cliente actualizado' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.patch('/api/clientes/:id/estado', allowAdminWaiterCashier, async (req, res) => {
+    const activo = req.body.activo ? 1 : 0;
+    try {
+        const [result] = await pool.query('UPDATE clientes SET activo = ? WHERE id = ?', [activo, req.params.id]);
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Cliente no encontrado' });
+        res.json({ message: activo ? 'Cliente activado' : 'Cliente desactivado', activo });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Solo se elimina un cliente sin pedidos, deliverys ni comprobantes; si tiene alguno se responde 409 para que se desactive.
+app.delete('/api/clientes/:id', allowAdminWaiterCashier, async (req, res) => {
+    try {
+        const [[refs]] = await pool.query(
+            `SELECT (SELECT COUNT(*) FROM pedidos WHERE cliente_id = ?) AS pedidos,
+                    (SELECT COUNT(*) FROM pedidos_delivery WHERE cliente_id = ?) AS deliverys,
+                    (SELECT COUNT(*) FROM facturas WHERE cliente_id = ?) AS comprobantes`,
+            [req.params.id, req.params.id, req.params.id]
+        );
+        const detalle = [
+            refs.pedidos > 0 && `${refs.pedidos} pedido(s)`,
+            refs.deliverys > 0 && `${refs.deliverys} delivery(s)`,
+            refs.comprobantes > 0 && `${refs.comprobantes} comprobante(s)`
+        ].filter(Boolean);
+        if (detalle.length > 0) {
+            return res.status(409).json({
+                error: `No se puede eliminar: el cliente tiene ${detalle.join(', ')} registrados. Solo se puede desactivar.`,
+                referencias: refs,
+                puede_desactivar: true
+            });
+        }
+        const [result] = await pool.query('DELETE FROM clientes WHERE id = ?', [req.params.id]);
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Cliente no encontrado' });
+        res.json({ message: 'Cliente eliminado' });
+    } catch (err) {
+        if (err.code === 'ER_ROW_IS_REFERENCED_2' || err.code === 'ER_ROW_IS_REFERENCED') {
+            return res.status(409).json({ error: 'No se puede eliminar: el cliente tiene registros asociados. Solo se puede desactivar.', puede_desactivar: true });
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -8130,13 +8194,26 @@ const asegurarDescuentos = async () => {
     tieneDescuentos = true;
 };
 
+// clientes.activo: un cliente con pedidos o comprobantes no se elimina, se desactiva. Idempotente.
+const asegurarClientesActivo = async () => {
+    const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'clientes' AND COLUMN_NAME = 'activo'"
+    );
+    if (rows.length === 0) {
+        await pool.query('ALTER TABLE clientes ADD COLUMN activo TINYINT(1) NOT NULL DEFAULT 1');
+        console.log('clientes.activo agregado');
+    }
+    tieneClienteActivo = true;
+};
+
 const iniciar = () => app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     permisos.iniciar();
     asegurarDescuentos().catch((err) => console.error('No se pudieron preparar las columnas de descuento:', err.message));
     asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
+    asegurarClientesActivo().catch((err) => console.error('No se pudo preparar clientes.activo:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();
     setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref(); });
 if (require.main === module) iniciar();
-module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, cargarUnidadesSunat };
+module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, asegurarClientesActivo, cargarUnidadesSunat };

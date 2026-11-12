@@ -456,6 +456,11 @@ async function migrate() {
             await pool.query('ALTER TABLE clientes ADD COLUMN direccion VARCHAR(255) NULL');
             console.log('Added clientes.direccion');
         }
+        // Clientes con pedidos o comprobantes no se pueden eliminar: se desactivan (activo = 0) y dejan de ofrecerse en los selectores.
+        if (!(await columnExists('clientes', 'activo'))) {
+            await pool.query('ALTER TABLE clientes ADD COLUMN activo TINYINT(1) NOT NULL DEFAULT 1');
+            console.log('Added clientes.activo');
+        }
 
         await pool.query("ALTER TABLE facturas MODIFY tipo_comprobante ENUM('boleta', 'factura', 'nota_venta', 'nota_credito', 'nota_debito') NOT NULL");
         const facturaColumns = [
