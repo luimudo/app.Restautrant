@@ -11,9 +11,12 @@ import EditComandaModal from '../components/billing/EditComandaModal';
 import { descargarReporteVentasExcel } from '../utils/exportVentas';
 import { BotonesInformeArqueo, HistorialArqueos } from '../components/billing/ArqueoInformes';
 import ComprobantesPanel from '../components/billing/ComprobantesPanel';
+import CajasAdminModal from '../components/billing/CajasAdminModal';
 
 const Billing = () => {
-    const { activeUser } = useAuth();
+    const { activeUser, activeSede } = useAuth();
+    const esAdministrador = activeUser?.perfil === 'superadmin' || activeUser?.base === 'administrador';
+    const [showCajasAdmin, setShowCajasAdmin] = useState(false);
 
     const [pedidos, setPedidos] = useState([]);
     const [cobrarPedido, setCobrarPedido] = useState(null);
@@ -135,34 +138,30 @@ const Billing = () => {
         setSalesReportError('');
     };
 
-    const fetchCashAuditData = async () => {
+    // Each caja opens, counts and closes on its own: the audit shows the session of the selected caja.
+    const fetchCashAuditData = async (cajaElegida = openSessionForm.caja_id) => {
         setCashAuditLoading(true);
         setCashAuditError('');
         try {
-            const [cajasRes, activeRes] = await Promise.all([
-                fetch('/api/cajas'),
-                fetch('/api/caja/sesion-activa')
-            ]);
-
+            const cajasRes = await fetch('/api/cajas');
             if (!cajasRes.ok) throw new Error('No se pudo cargar las cajas');
+            const cajasData = await cajasRes.json();
+            const safeCajas = Array.isArray(cajasData) ? cajasData : [];
+            setCajas(safeCajas);
+
+            const existe = safeCajas.some((c) => String(c.id) === String(cajaElegida));
+            const cajaId = existe
+                ? String(cajaElegida)
+                : String((safeCajas.find((c) => c.sesion_abierta_id) || safeCajas[0])?.id || '');
+            setOpenSessionForm((prev) => ({ ...prev, caja_id: cajaId }));
+
+            const activeRes = await fetch(`/api/caja/sesion-activa${cajaId ? `?caja_id=${cajaId}` : ''}`);
             if (!activeRes.ok) {
                 const err = await activeRes.json().catch(() => ({}));
                 throw new Error(err.error || 'No se pudo obtener sesion activa');
             }
-
-            const cajasData = await cajasRes.json();
             const activeSessionData = await activeRes.json();
-
-            const safeCajas = Array.isArray(cajasData) ? cajasData : [];
-            setCajas(safeCajas);
             setActiveCashSession(activeSessionData || null);
-
-            if (!openSessionForm.caja_id && safeCajas.length > 0) {
-                setOpenSessionForm((prev) => ({
-                    ...prev,
-                    caja_id: String(safeCajas[0].id)
-                }));
-            }
 
             if (activeSessionData?.resumen?.monto_teorico !== undefined) {
                 setCloseSessionForm((prev) => ({
@@ -615,9 +614,18 @@ const Billing = () => {
                                     >
                                         <FileDown size={16} /> Historial e informes
                                     </button>
+                                    {esAdministrador && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowCajasAdmin(true)}
+                                            className="px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-bold"
+                                        >
+                                            Cajas
+                                        </button>
+                                    )}
                                     <button
                                         type="button"
-                                        onClick={fetchCashAuditData}
+                                        onClick={() => fetchCashAuditData()}
                                         className="px-3 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
                                     >
                                         <RefreshCw size={16} />
@@ -633,6 +641,28 @@ const Billing = () => {
                             </div>
 
                             <div className="p-6 space-y-6">
+                                {cajas.length > 1 && (
+                                    <div className="flex flex-wrap gap-2" role="tablist" aria-label="Cajas de la sede">
+                                        {cajas.map((caja) => {
+                                            const elegida = String(caja.id) === String(openSessionForm.caja_id);
+                                            return (
+                                                <button
+                                                    key={caja.id}
+                                                    type="button"
+                                                    role="tab"
+                                                    aria-selected={elegida}
+                                                    onClick={() => fetchCashAuditData(String(caja.id))}
+                                                    className={`px-4 py-2 rounded-xl border text-left transition-all ${elegida ? 'bg-brand-600 border-brand-600 text-white' : 'bg-white border-gray-200 text-gray-700 hover:border-brand-300'}`}
+                                                >
+                                                    <span className="block text-sm font-black">{caja.descripcion}</span>
+                                                    <span className={`block text-[10px] font-bold uppercase tracking-wider ${elegida ? 'text-white/80' : 'text-gray-400'}`}>
+                                                        {caja.sesion_abierta_id ? 'Abierta' : 'Cerrada'}{caja.almacen_nombre ? ` · ${caja.almacen_nombre}` : ''}
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
                                 {cashAuditError && (
                                     <div className="p-4 rounded-xl border border-red-200 bg-red-50 text-red-700 text-sm font-semibold">
                                         {cashAuditError}
@@ -647,7 +677,7 @@ const Billing = () => {
                                     <div className="space-y-4">
                                         <h4 className="text-lg font-black text-gray-900">Apertura de Caja</h4>
                                         {cajas.length === 0 ? (
-                                            <p className="text-sm text-gray-500">No hay cajas configuradas. Crea una caja primero en backend/configuracion.</p>
+                                            <p className="text-sm text-gray-500">No hay cajas activas en la sede. {esAdministrador ? 'Créalas con el botón «Cajas».' : 'Pide al administrador que cree una.'}</p>
                                         ) : (
                                             <form onSubmit={handleOpenCashSession} className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                                 <div>
@@ -655,12 +685,12 @@ const Billing = () => {
                                                     <select
                                                         className="w-full px-3 py-2.5 rounded-xl border border-gray-200 font-medium text-sm"
                                                         value={openSessionForm.caja_id}
-                                                        onChange={(e) => setOpenSessionForm((prev) => ({ ...prev, caja_id: e.target.value }))}
+                                                        onChange={(e) => fetchCashAuditData(e.target.value)}
                                                         required
                                                     >
                                                         <option value="">Selecciona caja</option>
                                                         {cajas.map((caja) => (
-                                                            <option key={caja.id} value={caja.id}>{caja.descripcion}</option>
+                                                            <option key={caja.id} value={caja.id}>{caja.descripcion}{caja.almacen_nombre ? ` (${caja.almacen_nombre})` : ''}</option>
                                                         ))}
                                                     </select>
                                                 </div>
@@ -723,6 +753,8 @@ const Billing = () => {
                                             )}
                                             <span className="text-xs font-bold text-gray-500">
                                                 Caja: {activeCashSession.caja_descripcion || activeCashSession.caja_id}
+                                                {cajas.find((c) => Number(c.id) === Number(activeCashSession.caja_id))?.almacen_nombre
+                                                    ? ` · Almacén: ${cajas.find((c) => Number(c.id) === Number(activeCashSession.caja_id)).almacen_nombre}` : ''}
                                             </span>
                                             <div className="ml-auto flex items-center gap-2">
                                                 <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Informe de movimientos</span>
@@ -1054,6 +1086,13 @@ const Billing = () => {
                     </motion.div>
                 )}
             </AnimatePresence>
+            {showCajasAdmin && (
+                <CajasAdminModal
+                    sedeNombre={activeSede?.nombre}
+                    onClose={() => setShowCajasAdmin(false)}
+                    onChanged={() => fetchCashAuditData()}
+                />
+            )}
         </div>
     );
 };

@@ -1,15 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { ChefHat, Plus, Trash2, Edit2, Search, Filter, UtensilsCrossed, Info, Tag, Download, Check, X, Power } from 'lucide-react';
+import { ChefHat, Plus, Trash2, Edit2, Search, Filter, UtensilsCrossed, Info, Tag, Download, Check, X, Power, Beer } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import { optimizeProductImage } from '../utils/productImage';
 import { descargarCarta } from '../utils/exportCarta';
 import { useUnidades } from '../hooks/useUnidades';
+import ConsumoLitrosModal from '../components/menu/ConsumoLitrosModal';
+
+const fmtCantidad = (v) => Number(v || 0).toLocaleString('es-PE', { maximumFractionDigits: 3 });
 
 const MenuManagement = () => {
     const { activeUser, activeSede } = useAuth();
     const { activas: unidadesActivas } = useUnidades(!!activeUser);
     const [exporting, setExporting] = useState(false);
+    const [showConsumo, setShowConsumo] = useState(false);
     const [productos, setProductos] = useState([]);
     const [categorias, setCategorias] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -74,7 +78,11 @@ const MenuManagement = () => {
             const res = await fetch(url, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(currentProduct)
+                body: JSON.stringify({
+                    ...currentProduct,
+                    producto_base_id: currentProduct.producto_base_id ? Number(currentProduct.producto_base_id) : null,
+                    es_receta: currentProduct.producto_base_id ? true : currentProduct.es_receta
+                })
             });
             const saved = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(saved.error || 'No se pudo guardar el producto.');
@@ -98,7 +106,7 @@ const MenuManagement = () => {
             setImageData('');
             setImagePreview('');
             setRemoveImage(false);
-            setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true });
+            setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true, producto_base_id: '' });
             fetchData();
         } catch (error) {
             setProductError(error.message || 'No se pudo guardar el producto.');
@@ -109,7 +117,7 @@ const MenuManagement = () => {
     };
 
     const openNewProduct = () => {
-        setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true });
+        setCurrentProduct({ id: null, nombre: '', descripcion: '', precio: '', tipo_id: '', es_receta: true, disponible: true, producto_base_id: '' });
         setImageData('');
         setImagePreview('');
         setRemoveImage(false);
@@ -118,7 +126,7 @@ const MenuManagement = () => {
     };
 
     const openEditProduct = (product) => {
-        setCurrentProduct(product);
+        setCurrentProduct({ ...product, producto_base_id: product.producto_base_id || '' });
         setImageData('');
         setImagePreview(product.imagen_url || '');
         setRemoveImage(false);
@@ -235,6 +243,9 @@ const MenuManagement = () => {
                     <p className="text-[var(--text-secondary)] mt-1.5 font-medium">Administra tus platos, bebidas y categorías del menú.</p>
                 </div>
                 <div className="flex flex-wrap gap-4">
+                    <button onClick={() => setShowConsumo(true)} className="btn btn-secondary" title="Consumo de cerveza de barril por litros">
+                        <Beer size={18} /> Consumo por litros
+                    </button>
                     <button
                         onClick={exportarCarta}
                         disabled={exporting || filteredProductos.length === 0}
@@ -342,7 +353,11 @@ const MenuManagement = () => {
                                 <span className="px-2.5 py-1 bg-gray-100 text-gray-500 rounded-lg text-[9px] font-black uppercase tracking-widest border border-gray-200">
                                     {producto.tipo_nombre || 'S/C'}
                                 </span>
-                                {producto.es_receta ? (
+                                {producto.producto_base_id ? (
+                                    <span className="px-2.5 py-1 bg-amber-50 text-amber-700 rounded-lg text-[9px] font-black uppercase tracking-widest border border-amber-100" title={`Descuenta ${fmtCantidad(producto.factor_venta)} ${producto.base_unidad || ''} de ${producto.base_nombre}`}>
+                                        {fmtCantidad(producto.factor_venta)} {producto.base_unidad} de {producto.base_nombre}
+                                    </span>
+                                ) : producto.es_receta ? (
                                     <span className="px-2.5 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-emerald-100">Sin stock</span>
                                 ) : (
                                     <span className="px-2.5 py-1 bg-blue-50 text-blue-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-blue-100">Con stock</span>
@@ -351,6 +366,12 @@ const MenuManagement = () => {
                         </div>
                         <div className="pt-6 border-t border-gray-50 flex justify-between items-center">
                             <p className="text-2xl font-display font-black text-brand-900 leading-none">S/ {Number(producto.precio).toFixed(2)}</p>
+                            {producto.producto_base_id && (
+                                <div className="text-right">
+                                    <p className="text-[9px] font-black uppercase text-gray-400 tracking-widest leading-none mb-1">Stock barril</p>
+                                    <p className={`font-display font-black leading-none ${Number(producto.stock_base) < Number(producto.factor_venta) * 5 ? 'text-red-500' : 'text-emerald-500'}`}>{fmtCantidad(producto.stock_base)} {producto.base_unidad}</p>
+                                </div>
+                            )}
                             {producto.stock !== undefined && !Number(producto.es_receta) && (
                                 <div className="text-right">
                                     <p className="text-[9px] font-black uppercase text-gray-400 tracking-widest leading-none mb-1">Stock</p>
@@ -468,7 +489,50 @@ const MenuManagement = () => {
                                     </select>
                                     <p className="text-xs text-gray-500">Es la unidad que se envía a SUNAT en el comprobante electrónico.</p>
                                 </div>
-                                {!currentProduct.es_receta && (
+                                <div className="space-y-3 rounded-2xl border border-amber-100 bg-amber-50/50 p-4">
+                                    <label className="text-sm font-bold text-[var(--text-secondary)] flex items-center gap-2"><Beer size={16} className="text-amber-600" /> Presentación de un producto por litros</label>
+                                    <select
+                                        className="input"
+                                        value={currentProduct.producto_base_id || ''}
+                                        onChange={(e) => setCurrentProduct({ ...currentProduct, producto_base_id: e.target.value, factor_venta: e.target.value ? (currentProduct.factor_venta ?? '') : (currentProduct.factor_venta || 1) })}
+                                    >
+                                        <option value="">No: el producto controla su propio stock (o no tiene stock)</option>
+                                        {productos
+                                            .filter((p) => !Number(p.es_receta) && !p.producto_base_id && p.id !== currentProduct.id)
+                                            .map((p) => <option key={p.id} value={p.id}>Descuenta de: {p.nombre} ({p.unidad_medida})</option>)}
+                                    </select>
+                                    {currentProduct.producto_base_id ? (
+                                        <div className="space-y-2">
+                                            <label className="text-sm font-bold text-[var(--text-secondary)]">
+                                                Cantidad que descuenta cada unidad vendida ({productos.find((p) => String(p.id) === String(currentProduct.producto_base_id))?.unidad_medida || 'litros'})
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="0.001"
+                                                step="0.001"
+                                                className="input"
+                                                placeholder="Ej. 0.30 para un vaso de 0.3 L"
+                                                value={currentProduct.factor_venta ?? ''}
+                                                onChange={(e) => setCurrentProduct({ ...currentProduct, factor_venta: e.target.value })}
+                                                required
+                                            />
+                                            <p className="text-xs text-gray-500">Vaso 0.3 L → 0.30 · Vaso 0.5 L → 0.50 · Vaso 1 L → 1.00 · Jarra 1.5 L → 1.50. Al anular la venta, los litros vuelven al stock.</p>
+                                        </div>
+                                    ) : (
+                                        <p className="text-xs text-gray-500">Para cerveza de barril: crea el barril con stock en litros y luego cada presentación (vaso, jarra) con su precio, eligiendo aquí el barril. Las gaseosas y bebidas envasadas no usan esta opción.</p>
+                                    )}
+                                    {currentProduct.id && !currentProduct.producto_base_id && productos.some((p) => Number(p.producto_base_id) === Number(currentProduct.id)) && (
+                                        <div className="text-xs text-gray-600">
+                                            <p className="font-bold mb-1">Presentaciones que descuentan de este producto:</p>
+                                            <ul className="space-y-0.5">
+                                                {productos.filter((p) => Number(p.producto_base_id) === Number(currentProduct.id)).map((p) => (
+                                                    <li key={p.id}>• {p.nombre}: {fmtCantidad(p.factor_venta)} {currentProduct.unidad_medida} · S/ {Number(p.precio).toFixed(2)}</li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+                                </div>
+                                {!currentProduct.es_receta && !currentProduct.producto_base_id && (
                                     <div className="space-y-2">
                                         <label className="text-sm font-bold text-[var(--text-secondary)]">Costo unitario (S/ por {currentProduct.unidad_medida || 'unidad de stock'})</label>
                                         <input
@@ -482,7 +546,7 @@ const MenuManagement = () => {
                                         <p className="text-xs text-gray-500">Opcional. Al registrar entradas de inventario con costo, este valor se actualiza solo con el promedio ponderado.</p>
                                     </div>
                                 )}
-                                {!currentProduct.es_receta && (
+                                {!currentProduct.es_receta && !currentProduct.producto_base_id && (
                                     <div className="space-y-2">
                                         <label className="text-sm font-bold text-[var(--text-secondary)]">Stock que descuenta cada unidad vendida</label>
                                         <input
@@ -513,7 +577,8 @@ const MenuManagement = () => {
                                         <input
                                             type="checkbox"
                                             className="w-5 h-5 accent-brand-600 rounded-lg cursor-pointer"
-                                            checked={currentProduct.es_receta}
+                                            checked={Boolean(currentProduct.es_receta) || Boolean(currentProduct.producto_base_id)}
+                                            disabled={Boolean(currentProduct.producto_base_id)}
                                             onChange={(e) => setCurrentProduct({ ...currentProduct, es_receta: e.target.checked })}
                                         />
                                         <span className="text-sm font-bold text-[var(--text-secondary)]">Es Receta</span>
@@ -528,6 +593,8 @@ const MenuManagement = () => {
                     </div>
                 )}
             </AnimatePresence>
+
+            {showConsumo && <ConsumoLitrosModal sedeNombre={activeSede?.nombre} onClose={() => setShowConsumo(false)} />}
 
             {/* Category Modal (Simplified) */}
             <AnimatePresence>

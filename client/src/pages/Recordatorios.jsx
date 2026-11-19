@@ -4,7 +4,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { Modal, Field, ErrorBox, ToggleGroup } from '../components/billing/billingShared';
-import { readJson, money } from '../components/billing/billingUtils';
+import { readJson, money, METODOS_COBRO } from '../components/billing/billingUtils';
+import { toPeruYmd } from '../utils/dateTime';
 
 export const CATEGORIAS = { pago: 'Pago', documento: 'Documento', licencia: 'Licencia', otro: 'Otro' };
 
@@ -32,6 +33,7 @@ const Recordatorios = () => {
     const [busyId, setBusyId] = useState(null);
     const [form, setForm] = useState(null);
     const [fechaTarget, setFechaTarget] = useState(null);
+    const [pagoTarget, setPagoTarget] = useState(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -159,12 +161,21 @@ const Recordatorios = () => {
                                         <p className="text-[10px] text-gray-400">Avisa {r.dias_aviso} día(s) antes</p>
                                     </td>
                                     <td className="px-5 py-4 text-sm">{faltan(r)}</td>
-                                    <td className="px-5 py-4">{badge(r)}</td>
+                                    <td className="px-5 py-4">
+                                        {badge(r)}
+                                        {r.pago_periodo && (
+                                            <p className="text-[10px] text-sky-700 font-bold mt-1" title="Pago generado en Pagos y Gastos">
+                                                {r.pago_periodo.gasto_codigo} · {formatFecha(r.pago_periodo.gasto_fecha)}
+                                            </p>
+                                        )}
+                                    </td>
                                     <td className="px-5 py-4">
                                         <div className="flex flex-wrap justify-end gap-1">
                                             {r.activo && !r.atendido && (
                                                 <button className="btn btn-primary text-xs px-3 py-2" disabled={busyId === r.id}
-                                                    onClick={() => accion(r, '/atender', `${r.nombre}: ${labelAtendido(r).toLowerCase()}.`)}>
+                                                    onClick={() => (r.categoria === 'pago' && Number(r.monto) > 0
+                                                        ? setPagoTarget(r)
+                                                        : accion(r, '/atender', `${r.nombre}: ${labelAtendido(r).toLowerCase()}.`))}>
                                                     <CheckCircle2 size={14} /> {r.categoria === 'pago' ? 'Marcar pagado' : 'Marcar atendido'}
                                                 </button>
                                             )}
@@ -202,6 +213,17 @@ const Recordatorios = () => {
             </div>
 
             {form && <RecordatorioModal initial={form} onClose={() => setForm(null)} onSaved={(r, editando) => { setForm(null); setMessage(`Recordatorio "${r.nombre}" ${editando ? 'actualizado' : 'registrado'}.`); load(); }} />}
+
+            {pagoTarget && (
+                <PagoModal recordatorio={pagoTarget} onClose={() => setPagoTarget(null)}
+                    onSaved={(r, conPago) => {
+                        setPagoTarget(null);
+                        setMessage(conPago && r.pago_periodo
+                            ? `${r.nombre}: pagado. Se registró el gasto ${r.pago_periodo.gasto_codigo} en Pagos y Gastos.`
+                            : `${r.nombre}: pagado.`);
+                        load();
+                    }} />
+            )}
 
             {fechaTarget && (
                 <FechaModal target={fechaTarget} onClose={() => setFechaTarget(null)}
@@ -279,6 +301,107 @@ const RecordatorioModal = ({ initial, onClose, onSaved }) => {
                 <div className="flex gap-3 pt-1">
                     <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Cancelar</button>
                     <button type="submit" className="btn btn-primary flex-1" disabled={saving}>{saving ? 'Guardando...' : editando ? 'Actualizar' : 'Guardar'}</button>
+                </div>
+            </form>
+        </Modal>
+    );
+};
+
+/** T-01: confirmar fecha y medio de pago; el pago queda registrado en Pagos y Gastos vinculado al periodo. */
+const PagoModal = ({ recordatorio, onClose, onSaved }) => {
+    const [form, setForm] = useState({
+        generar_pago: true, fecha_pago: toPeruYmd(), metodo_pago: 'efectivo', referencia: '', categoria_gasto_id: '', tipo_documento: 'sin_comprobante', serie: '', numero: ''
+    });
+    const [categorias, setCategorias] = useState([]);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+    const set = (patch) => setForm((prev) => ({ ...prev, ...patch }));
+
+    useEffect(() => {
+        // Sin acceso a Gastos la API usa la categoria "Otros gastos".
+        fetch('/api/gastos/opciones').then((res) => (res.ok ? res.json() : null)).then((data) => {
+            const lista = data?.categorias || [];
+            setCategorias(lista);
+            const nombre = recordatorio.nombre.toLowerCase();
+            const sugerida = lista.find((c) => nombre.includes(c.nombre.toLowerCase().split(' ')[0]))
+                || lista.find((c) => c.nombre === 'Otros gastos');
+            if (sugerida) setForm((prev) => ({ ...prev, categoria_gasto_id: String(sugerida.id) }));
+        }).catch(() => {});
+    }, [recordatorio.nombre]);
+
+    const save = async (event) => {
+        event.preventDefault();
+        setSaving(true);
+        setError('');
+        try {
+            const r = await readJson(await fetch(`/api/recordatorios/${recordatorio.id}/atender`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form)
+            }), 'No se pudo registrar el pago.');
+            onSaved(r, form.generar_pago);
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const periodo = recordatorio.tipo_vencimiento === 'periodico'
+        ? `Periodo ${toPeruYmd().slice(0, 7)}`
+        : `Vencimiento ${formatFecha(recordatorio.fecha_vencimiento)}`;
+
+    return (
+        <Modal title="Marcar como pagado" subtitle={`${recordatorio.nombre} · ${money(recordatorio.monto)} · ${periodo}`} onClose={onClose}>
+            <ErrorBox text={error} />
+            <form onSubmit={save} className="space-y-4">
+                <label className="flex items-start gap-3 p-3 rounded-xl border border-gray-200 bg-gray-50 cursor-pointer">
+                    <input type="checkbox" className="mt-1 w-4 h-4 accent-brand-600" checked={form.generar_pago} onChange={(e) => set({ generar_pago: e.target.checked })} />
+                    <span>
+                        <span className="font-bold text-sm">Registrar el pago en Pagos y Gastos</span>
+                        <span className="block text-xs text-gray-500">Se crea un gasto al contado por {money(recordatorio.monto)} vinculado a este recordatorio.</span>
+                    </span>
+                </label>
+                {form.generar_pago && (
+                    <>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <Field label="Fecha de pago"><input type="date" className="input" max={toPeruYmd()} value={form.fecha_pago} onChange={(e) => set({ fecha_pago: e.target.value })} required /></Field>
+                            <Field label="Medio de pago">
+                                <select className="input" value={form.metodo_pago} onChange={(e) => set({ metodo_pago: e.target.value })}>
+                                    {METODOS_COBRO.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                                </select>
+                            </Field>
+                        </div>
+                        {categorias.length > 0 && (
+                            <Field label="Categoría del gasto">
+                                <select className="input" value={form.categoria_gasto_id} onChange={(e) => set({ categoria_gasto_id: e.target.value })} required>
+                                    <option value="">Elegir...</option>
+                                    {categorias.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                                </select>
+                            </Field>
+                        )}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <Field label="Comprobante">
+                                <select className="input" value={form.tipo_documento} onChange={(e) => set({ tipo_documento: e.target.value })}>
+                                    <option value="sin_comprobante">Sin comprobante</option>
+                                    <option value="recibo_servicios">Recibo de servicios</option>
+                                    <option value="boleta">Boleta</option>
+                                    <option value="factura">Factura</option>
+                                    <option value="ticket">Ticket</option>
+                                    <option value="tributo">Tributo</option>
+                                </select>
+                            </Field>
+                            {form.tipo_documento !== 'sin_comprobante' && (
+                                <>
+                                    <Field label="Serie"><input className="input" value={form.serie} onChange={(e) => set({ serie: e.target.value })} maxLength={10} /></Field>
+                                    <Field label="Número"><input className="input" value={form.numero} onChange={(e) => set({ numero: e.target.value })} maxLength={20} required /></Field>
+                                </>
+                            )}
+                        </div>
+                        <Field label="Referencia / N° de operación (opcional)"><input className="input" value={form.referencia} onChange={(e) => set({ referencia: e.target.value })} maxLength={100} /></Field>
+                    </>
+                )}
+                <div className="flex gap-3 pt-1">
+                    <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Cancelar</button>
+                    <button type="submit" className="btn btn-primary flex-1" disabled={saving}>{saving ? 'Registrando...' : 'Confirmar pago'}</button>
                 </div>
             </form>
         </Modal>

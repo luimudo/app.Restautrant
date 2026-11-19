@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { LayoutDashboard, ShoppingCart, UtensilsCrossed, Users, FileText, Package, LogOut, Bell, Search, ChevronRight, Settings, HelpCircle, ChefHat, Beer, Building2, CalendarDays, Wallet, Wrench, Warehouse, Menu, X, BellRing, Bike, HandCoins, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, UtensilsCrossed, Users, FileText, Package, LogOut, Bell, Search, ChevronRight, Settings, HelpCircle, ChefHat, Beer, Building2, CalendarDays, Wallet, Wrench, Warehouse, Menu, X, BellRing, Bike, HandCoins, ShieldCheck, IdCard } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import { MODULES } from '../security/accessControl';
@@ -18,6 +18,7 @@ const MAIN_ITEMS = [
     { to: '/purchases', icon: <ShoppingCart size={20} />, label: 'Compras', moduleKey: MODULES.purchases },
     { to: '/almacenes', icon: <Warehouse size={20} />, label: 'Almacenes y Guías', moduleKey: MODULES.warehouses },
     { to: '/equipos', icon: <Wrench size={20} />, label: 'Equipos', moduleKey: MODULES.equipment },
+    { to: '/personal', icon: <IdCard size={20} />, label: 'Personal', moduleKey: MODULES.personnel },
     { to: '/gastos', icon: <Wallet size={20} />, label: 'Gastos y Pagos', moduleKey: MODULES.expenses },
     { to: '/recordatorios', icon: <BellRing size={20} />, label: 'Recordatorios', moduleKey: MODULES.reminders },
     { to: '/suppliers', icon: <Users size={20} />, label: 'Proveedores', moduleKey: MODULES.suppliers },

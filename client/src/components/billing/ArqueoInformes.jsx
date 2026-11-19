@@ -40,15 +40,17 @@ export const BotonesInformeArqueo = ({ sesionId, compacto = false, onError }) =>
 /** History of cash sessions of the sede, with the movements report of each one. */
 export const HistorialArqueos = ({ onClose }) => {
     const hoy = toPeruYmd();
-    const [filtros, setFiltros] = useState({ desde: addDaysYmd(hoy, -30), hasta: hoy });
+    const [filtros, setFiltros] = useState({ desde: addDaysYmd(hoy, -30), hasta: hoy, caja_id: '' });
     const [sesiones, setSesiones] = useState([]);
+    const [cajas, setCajas] = useState([]);
     const [cargando, setCargando] = useState(true);
     const [error, setError] = useState('');
 
     const cargar = useCallback(async (actuales) => {
         setCargando(true);
         try {
-            const cuerpo = await readJson(await fetch(`/api/caja/sesiones?desde=${actuales.desde}&hasta=${actuales.hasta}`), 'No se pudo cargar el historial de arqueos.');
+            const caja = actuales.caja_id ? `&caja_id=${actuales.caja_id}` : '';
+            const cuerpo = await readJson(await fetch(`/api/caja/sesiones?desde=${actuales.desde}&hasta=${actuales.hasta}${caja}`), 'No se pudo cargar el historial de arqueos.');
             setSesiones(cuerpo.sesiones);
             setError('');
         } catch (e) {
@@ -59,13 +61,22 @@ export const HistorialArqueos = ({ onClose }) => {
     }, []);
 
     useEffect(() => { cargar(filtros); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+    useEffect(() => {
+        fetch('/api/cajas?todas=1').then((r) => (r.ok ? r.json() : [])).then((lista) => setCajas(Array.isArray(lista) ? lista : [])).catch(() => {});
+    }, []);
 
     return (
         <Modal title="Historial de arqueos" subtitle="Informe de movimientos de cada sesión de caja (ventas, cobros, ingresos, egresos y devoluciones)." wide onClose={onClose}>
             <ErrorBox text={error} />
-            <form onSubmit={(e) => { e.preventDefault(); cargar(filtros); }} className="grid grid-cols-[1fr_1fr_auto] gap-3 items-end mb-4">
+            <form onSubmit={(e) => { e.preventDefault(); cargar(filtros); }} className="grid grid-cols-2 sm:grid-cols-[1fr_1fr_1fr_auto] gap-3 items-end mb-4">
                 <Field label="Desde"><input type="date" className="input" value={filtros.desde} max={filtros.hasta} onChange={(e) => setFiltros({ ...filtros, desde: e.target.value })} required /></Field>
                 <Field label="Hasta"><input type="date" className="input" value={filtros.hasta} min={filtros.desde} onChange={(e) => setFiltros({ ...filtros, hasta: e.target.value })} required /></Field>
+                <Field label="Caja">
+                    <select className="input" value={filtros.caja_id} onChange={(e) => setFiltros({ ...filtros, caja_id: e.target.value })}>
+                        <option value="">Todas las cajas</option>
+                        {cajas.map((c) => <option key={c.id} value={c.id}>{c.descripcion}</option>)}
+                    </select>
+                </Field>
                 <button type="submit" className="btn btn-secondary"><Search size={16} /> Buscar</button>
             </form>
 

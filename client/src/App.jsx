@@ -20,6 +20,7 @@ import Gastos from './pages/Gastos';
 import Equipos from './pages/Equipos';
 import Almacenes from './pages/Almacenes';
 import Recordatorios from './pages/Recordatorios';
+import Personal from './pages/Personal';
 import Delivery from './pages/Delivery';
 import Login from './pages/Login';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -80,6 +81,7 @@ function App() {
               <Route path="purchases" element={withAccess(MODULES.purchases, <Purchases />)} />
               <Route path="almacenes" element={withAccess(MODULES.warehouses, <Almacenes />)} />
               <Route path="equipos" element={withAccess(MODULES.equipment, <Equipos />)} />
+              <Route path="personal" element={withAccess(MODULES.personnel, <Personal />)} />
               <Route path="gastos" element={withAccess(MODULES.expenses, <Gastos />)} />
               <Route path="recordatorios" element={withAccess(MODULES.reminders, <Recordatorios />)} />
               <Route path="suppliers" element={withAccess(MODULES.suppliers, <Suppliers />)} />

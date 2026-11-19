@@ -72,7 +72,7 @@ async function main() {
     };
     fs.writeFileSync(path.join(stage, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`);
 
-    for (const file of ['index.js', 'db.js', 'auth.js', 'facturacion.js', 'formatosComprobante.js', 'numeroALetras.js', 'permisos.js']) {
+    for (const file of ['index.js', 'db.js', 'auth.js', 'facturacion.js', 'formatosComprobante.js', 'numeroALetras.js', 'permisos.js', 'personal.js']) {
         fs.copyFileSync(path.join(serverRoot, file), path.join(stage, file));
     }
     fs.cpSync(clientBuild, path.join(stage, 'public'), { recursive: true });

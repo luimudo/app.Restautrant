@@ -342,7 +342,7 @@ const EmitirComprobanteModal = ({ pedido, onClose, onEmitido }) => {
                         {sesionesAbiertas.length > 0 && (
                             <Field label="Caja donde se registra la venta">
                                 <select className="input" value={cajaId} onChange={(e) => setCajaId(e.target.value)} disabled={sesionesAbiertas.length === 1}>
-                                    {sesionesAbiertas.map((s) => <option key={s.id} value={s.caja_id}>{s.caja_descripcion}</option>)}
+                                    {sesionesAbiertas.map((s) => <option key={s.id} value={s.caja_id}>{s.caja_descripcion}{s.almacen_nombre ? ` · ${s.almacen_nombre}` : ''}</option>)}
                                 </select>
                             </Field>
                         )}
