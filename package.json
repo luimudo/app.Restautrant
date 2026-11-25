@@ -5,7 +5,7 @@
   "description": "Raiz para el despliegue con GitHub en SmarterASP: npm install + npm run build + npm start",
   "main": "index.js",
   "engines": {
-    "node": ">=18"
+    "node": "24.x"
   },
   "scripts": {
     "build": "node scripts/build-hosting.cjs",
