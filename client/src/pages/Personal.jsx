@@ -7,7 +7,7 @@ import { Modal, Field, ErrorBox } from '../components/billing/billingShared';
 import { readJson, money } from '../components/billing/billingUtils';
 import { toPeruYmd, addDaysYmd, startOfMonthYmd, formatDateTime } from '../utils/dateTime';
 import {
-    VINCULO_LABEL, ESTADO_LABEL, FUNCION_LABEL, ESTADO_ELEMENTO_LABEL,
+    VINCULO_LABEL, ESTADO_LABEL, ESTADO_ELEMENTO_LABEL,
     exportarTrabajadores, exportarEntregas, exportarControl, exportarControles, exportarElementos, exportarCostos, exportarCatalogo
 } from '../utils/exportPersonal';
 
@@ -120,7 +120,36 @@ const TrabajadoresTab = ({ opciones, sede, avisar, setError }) => {
     const [lista, setLista] = useState([]);
     const [loading, setLoading] = useState(true);
     const [ficha, setFicha] = useState(null);
+    const [dniConsulta, setDniConsulta] = useState('');
+    const [consultando, setConsultando] = useState(false);
     const verRem = opciones.puede_ver_remuneracion;
+
+    // Como el sistema de bebidas: consulta RENIEC y abre la ficha nueva con los datos; si el DNI ya tiene ficha, avisa (y la abre si es de la sede).
+    const consultarDni = async (event) => {
+        event.preventDefault();
+        setConsultando(true);
+        setError('');
+        try {
+            const d = await readJson(await fetch(`/api/personal/consulta-dni/${dniConsulta}`), 'No se pudo consultar el DNI.');
+            if (d.existe) {
+                if (d.misma_sede && d.personal_id) {
+                    avisar(`El DNI ${dniConsulta} ya tiene ficha: ${d.trabajador}.`);
+                    setFicha({ id: d.personal_id });
+                } else {
+                    setError(`El DNI ${dniConsulta} ya tiene ficha en la sede ${d.sede} (${d.trabajador}).`);
+                }
+            } else {
+                setFicha({ nuevo: true, inicial: { dni: d.dni, nombres: d.nombres || '', apellidos: d.apellidos || '' } });
+            }
+            setDniConsulta('');
+        } catch (e) {
+            // Sin consulta disponible igual se puede crear la ficha a mano con el DNI escrito.
+            setError(e.message);
+            setFicha({ nuevo: true, inicial: { dni: dniConsulta } });
+        } finally {
+            setConsultando(false);
+        }
+    };
 
     const cargar = useCallback(async (f = filtros) => {
         setLoading(true);
@@ -173,7 +202,14 @@ const TrabajadoresTab = ({ opciones, sede, avisar, setError }) => {
 
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-gray-500">{lista.length} trabajador(es) · {activos} activo(s)</p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2 items-center">
+                    <form className="flex gap-2 items-center" onSubmit={consultarDni}>
+                        <input className="input w-36" inputMode="numeric" maxLength={8} pattern="\d{8}" required placeholder="DNI a consultar" aria-label="DNI a consultar"
+                            value={dniConsulta} onChange={(e) => setDniConsulta(e.target.value.replace(/\D/g, ''))} />
+                        <button type="submit" className="btn btn-secondary text-sm" disabled={consultando || dniConsulta.length !== 8}>
+                            <Search size={16} /> {consultando ? 'Consultando...' : 'Consultar DNI y crear ficha'}
+                        </button>
+                    </form>
                     <BotonExcel disabled={!lista.length} onClick={() => exportarTrabajadores(sede, lista, verRem).catch((e) => setError(e.message))} />
                     <button className="btn btn-primary text-sm" onClick={() => setFicha({ nuevo: true })}><Plus size={16} /> Nuevo trabajador</button>
                 </div>
@@ -181,21 +217,20 @@ const TrabajadoresTab = ({ opciones, sede, avisar, setError }) => {
 
             <Tabla minWidth={980} head={<>
                 <Th>Trabajador</Th><Th>Cargo / área</Th><Th>Turno</Th><Th>Vínculo</Th><Th>Ingreso</Th>
-                {verRem && <Th right>Remuneración</Th>}<Th>Docs.</Th><Th>Estado</Th><Th right>Acciones</Th>
+                <Th>Docs.</Th><Th>Estado</Th><Th right>Acciones</Th>
             </>}>
-                {loading && <Vacio cols={9} text="Cargando trabajadores..." />}
+                {loading && <Vacio cols={8} text="Cargando trabajadores..." />}
                 {!loading && lista.map((t) => (
                     <tr key={t.id} className="border-b border-gray-100 align-top">
                         <td className="px-4 py-3">
                             <p className="font-bold">{t.apellidos}, {t.nombres}</p>
                             <p className="text-xs text-gray-500">DNI {t.dni}{t.codigo ? ` · ${t.codigo}` : ''}</p>
-                            {t.funciones.length > 0 && <p className="text-[10px] text-brand-700 font-bold mt-0.5">{t.funciones.map((f) => FUNCION_LABEL[f] || f).join(' · ')}</p>}
+                            {t.funciones && <p className="text-[10px] text-brand-700 font-bold mt-0.5 line-clamp-2 max-w-xs" title={t.funciones}>{t.funciones}</p>}
                         </td>
                         <td className="px-4 py-3"><p className="font-semibold">{t.cargo || '—'}</p><p className="text-xs text-gray-500">{t.area || 'Sin área'}</p></td>
                         <td className="px-4 py-3">{t.turno || '—'}</td>
                         <td className="px-4 py-3">{VINCULO_LABEL[t.vinculo] || t.vinculo}</td>
                         <td className="px-4 py-3 whitespace-nowrap">{fecha(t.fecha_ingreso)}{t.fecha_cese && <p className="text-xs text-gray-500">Cese: {fecha(t.fecha_cese)}</p>}</td>
-                        {verRem && <td className="px-4 py-3 text-right tabular-nums font-bold">{t.remuneracion === null ? '—' : money(t.remuneracion)}</td>}
                         <td className="px-4 py-3">{t.adjuntos > 0 ? <span className="flex items-center gap-1 text-brand-700 font-bold"><Paperclip size={14} />{t.adjuntos}</span> : <span className="text-gray-300">—</span>}</td>
                         <td className="px-4 py-3"><Badge className={ESTADO_STYLE[t.estado]}>{ESTADO_LABEL[t.estado]}</Badge></td>
                         <td className="px-4 py-3 text-right">
@@ -203,11 +238,11 @@ const TrabajadoresTab = ({ opciones, sede, avisar, setError }) => {
                         </td>
                     </tr>
                 ))}
-                {!loading && lista.length === 0 && <Vacio cols={9} text="No hay trabajadores con esos filtros. Registra el primero con «Nuevo trabajador»." />}
+                {!loading && lista.length === 0 && <Vacio cols={8} text="No hay trabajadores con esos filtros. Registra el primero con «Nuevo trabajador»." />}
             </Tabla>
 
             {ficha && (
-                <TrabajadorModal id={ficha.id} opciones={opciones} onClose={() => setFicha(null)}
+                <TrabajadorModal id={ficha.id} inicial={ficha.inicial} opciones={opciones} onClose={() => setFicha(null)}
                     onSaved={(t, nuevo) => { avisar(`Trabajador ${t.nombres} ${t.apellidos} ${nuevo ? 'registrado' : 'actualizado'}.`); cargar(); if (nuevo) setFicha({ id: t.id }); }}
                     onDocs={() => cargar()} />
             )}
@@ -217,11 +252,11 @@ const TrabajadoresTab = ({ opciones, sede, avisar, setError }) => {
 
 const TRABAJADOR_VACIO = {
     dni: '', codigo: '', nombres: '', apellidos: '', fecha_nacimiento: '', fecha_ingreso: '', fecha_cese: '', cargo_id: '', area_id: '', turno_id: '',
-    vinculo: 'planilla', ruc: '', sistema_pension: '', cuspp: '', remuneracion: '', funciones: [], telefono: '', email: '', direccion: '',
+    vinculo: 'planilla', ruc: '', sistema_pension: '', cuspp: '', remuneracion: '', funciones: '', telefono: '', email: '', direccion: '',
     contacto_emergencia: '', telefono_emergencia: '', usuario_id: '', estado: 'activo', observacion: ''
 };
 
-const TrabajadorModal = ({ id, opciones, onClose, onSaved, onDocs }) => {
+const TrabajadorModal = ({ id, inicial, opciones, onClose, onSaved, onDocs }) => {
     const [form, setForm] = useState(null);
     const [detalle, setDetalle] = useState(null);
     const [saving, setSaving] = useState(false);
@@ -229,7 +264,7 @@ const TrabajadorModal = ({ id, opciones, onClose, onSaved, onDocs }) => {
     const verRem = opciones.puede_ver_remuneracion;
 
     const cargar = useCallback(async () => {
-        if (!id) { setForm({ ...TRABAJADOR_VACIO }); return; }
+        if (!id) { setForm({ ...TRABAJADOR_VACIO, ...(inicial || {}) }); return; }
         try {
             const t = await readJson(await fetch(`/api/personal/trabajadores/${id}`), 'No se pudo cargar la ficha.');
             setDetalle(t);
@@ -239,11 +274,10 @@ const TrabajadorModal = ({ id, opciones, onClose, onSaved, onDocs }) => {
         } catch (e) {
             setError(e.message);
         }
-    }, [id]);
+    }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
     useEffect(() => { cargar(); }, [cargar]);
 
     const set = (patch) => setForm((prev) => ({ ...prev, ...patch }));
-    const toggleFuncion = (f) => set({ funciones: form.funciones.includes(f) ? form.funciones.filter((x) => x !== f) : [...form.funciones, f] });
 
     const save = async (event) => {
         event.preventDefault();
@@ -327,14 +361,8 @@ const TrabajadorModal = ({ id, opciones, onClose, onSaved, onDocs }) => {
 
                         <section>
                             <h5 className="text-xs font-black uppercase tracking-widest text-gray-500 mb-3">Funciones</h5>
-                            <div className="flex flex-wrap gap-2">
-                                {opciones.funciones.map((f) => (
-                                    <label key={f} className={`px-3 py-2 rounded-xl border text-sm font-bold cursor-pointer ${form.funciones.includes(f) ? 'bg-brand-50 border-brand-300 text-brand-700' : 'bg-white border-gray-200 text-gray-600'}`}>
-                                        <input type="checkbox" className="sr-only" checked={form.funciones.includes(f)} onChange={() => toggleFuncion(f)} />
-                                        {FUNCION_LABEL[f]}
-                                    </label>
-                                ))}
-                            </div>
+                            <textarea className="input min-h-[80px]" maxLength={4000} value={form.funciones} onChange={(e) => set({ funciones: e.target.value })}
+                                placeholder="Describa las funciones del trabajador. Ej.: Atención de mesas del salón, apoyo en caja en el turno tarde." aria-label="Funciones" />
                         </section>
 
                         <Field label="Observación"><textarea className="input min-h-[70px]" maxLength={2000} value={form.observacion} onChange={(e) => set({ observacion: e.target.value })} /></Field>
@@ -353,7 +381,7 @@ const TrabajadorModal = ({ id, opciones, onClose, onSaved, onDocs }) => {
                             {detalle.entregas.length === 0 ? <p className="text-sm text-gray-500">Sin entregas registradas.</p> : (
                                 <div className="overflow-x-auto">
                                     <table className="w-full text-sm min-w-[600px]">
-                                        <thead><tr className="text-left text-[10px] uppercase text-gray-500 border-b"><th className="py-2 pr-3">Fecha</th><th className="py-2 pr-3">Elemento</th><th className="py-2 pr-3 text-right">Cant.</th><th className="py-2 pr-3 text-right">Pendiente</th><th className="py-2 pr-3">Próx. cambio</th><th className="py-2 text-right">Costo</th></tr></thead>
+                                        <thead><tr className="text-left text-[10px] uppercase text-gray-500 border-b"><th className="py-2 pr-3">Fecha</th><th className="py-2 pr-3">Elemento</th><th className="py-2 pr-3 text-right">Cant.</th><th className="py-2 pr-3 text-right">Pendiente</th><th className="py-2 pr-3">Devolución / baja</th><th className="py-2 pr-3">Próx. cambio</th><th className="py-2 text-right">Costo</th></tr></thead>
                                         <tbody>
                                             {detalle.entregas.map((e) => (
                                                 <tr key={e.id} className={`border-b border-gray-50 ${Number(e.anulada) ? 'opacity-50 line-through' : ''}`}>
@@ -361,6 +389,7 @@ const TrabajadorModal = ({ id, opciones, onClose, onSaved, onDocs }) => {
                                                     <td className="py-2 pr-3">{e.elemento_nombre}{e.talla ? ` · talla ${e.talla}` : ''}</td>
                                                     <td className="py-2 pr-3 text-right">{cant(e.cantidad)}</td>
                                                     <td className="py-2 pr-3 text-right">{cant(e.pendiente)}</td>
+                                                    <td className="py-2 pr-3 text-xs"><FechasMovimiento e={e} /></td>
                                                     <td className="py-2 pr-3">{fecha(e.proximo_cambio)}</td>
                                                     <td className="py-2 text-right tabular-nums">{money(e.costo_total)}</td>
                                                 </tr>
@@ -503,7 +532,7 @@ const EntregasTab = ({ opciones, sede, avisar, setError }) => {
                     <select className="input" value={filtros.vista} onChange={(e) => set({ vista: e.target.value })}>
                         <option value="">Entregas del periodo</option>
                         <option value="por_cambiar">Por cambiar (próximos 15 días)</option>
-                        <option value="por_devolver">Pendientes de devolver</option>
+                        <option value="por_devolver">Pendientes de devolver o dar de baja</option>
                     </select>
                 </Field>
                 <Field label="Tipo">
@@ -531,9 +560,9 @@ const EntregasTab = ({ opciones, sede, avisar, setError }) => {
             </div>
 
             <Tabla minWidth={1000} head={<>
-                <Th>Fecha</Th><Th>Trabajador</Th><Th>Elemento</Th><Th right>Cant.</Th><Th right>Pendiente</Th><Th>Estado</Th><Th>Próx. cambio</Th><Th right>Costo</Th><Th right>Acciones</Th>
+                <Th>Fecha</Th><Th>Trabajador</Th><Th>Elemento</Th><Th right>Cant.</Th><Th right>Pendiente</Th><Th>Estado</Th><Th>Devolución / baja</Th><Th>Próx. cambio</Th><Th right>Costo</Th><Th right>Acciones</Th>
             </>}>
-                {loading && <Vacio cols={9} text="Cargando entregas..." />}
+                {loading && <Vacio cols={10} text="Cargando entregas..." />}
                 {!loading && lista.map((e) => {
                     const anulada = Number(e.anulada);
                     const vence = e.proximo_cambio && e.proximo_cambio <= hoy && e.pendiente > 0 && !anulada;
@@ -549,24 +578,25 @@ const EntregasTab = ({ opciones, sede, avisar, setError }) => {
                             <td className="px-4 py-3 text-right tabular-nums">{cant(e.cantidad)} {e.unidad}</td>
                             <td className="px-4 py-3 text-right tabular-nums">{cant(e.pendiente)}</td>
                             <td className="px-4 py-3">{ESTADO_ELEMENTO_LABEL[e.estado] || e.estado}</td>
+                            <td className="px-4 py-3 text-xs whitespace-nowrap"><FechasMovimiento e={e} /></td>
                             <td className={`px-4 py-3 whitespace-nowrap ${vence ? 'text-rose-600 font-bold' : ''}`}>{fecha(e.proximo_cambio)}</td>
                             <td className="px-4 py-3 text-right tabular-nums font-bold">{money(e.costo_total)}</td>
                             <td className="px-4 py-3 text-right whitespace-nowrap">
                                 {!anulada && e.pendiente > 0 && (
-                                    <button className="p-2 text-gray-500 hover:text-brand-600" title="Registrar devolución" aria-label="Registrar devolución" onClick={() => setDevolver(e)}><Undo2 size={16} /></button>
+                                    <button className="p-2 text-gray-500 hover:text-brand-600" title="Registrar devolución o baja" aria-label="Registrar devolución o baja" onClick={() => setDevolver(e)}><Undo2 size={16} /></button>
                                 )}
-                                {!anulada && e.devuelta === 0 && (
+                                {!anulada && e.devuelta === 0 && !e.baja && (
                                     <button className="p-2 text-gray-500 hover:text-rose-600" title="Anular entrega" aria-label="Anular entrega" onClick={() => setAnular(e)}><Ban size={16} /></button>
                                 )}
                             </td>
                         </tr>
                     );
                 })}
-                {!loading && lista.length === 0 && <Vacio cols={9} text="No hay entregas con esos filtros." />}
+                {!loading && lista.length === 0 && <Vacio cols={10} text="No hay entregas con esos filtros." />}
             </Tabla>
 
             {nueva && <EntregaModal inicial={nueva} opciones={opciones} trabajadores={trabajadores} onClose={() => setNueva(null)} onSaved={(e) => { setNueva(null); avisar(`Entrega registrada: ${e.elemento_nombre} para ${e.trabajador}.`); cargar(); }} />}
-            {devolver && <DevolucionModal entrega={devolver} onClose={() => setDevolver(null)} onSaved={() => { setDevolver(null); avisar('Devolución registrada.'); cargar(); }} />}
+            {devolver && <DevolucionModal entrega={devolver} onClose={() => setDevolver(null)} onSaved={(tipo) => { setDevolver(null); avisar(tipo === 'baja' ? 'Baja registrada.' : 'Devolución registrada.'); cargar(); }} />}
             {anular && <MotivoModal titulo="Anular entrega" subtitulo={`${anular.elemento_nombre} · ${anular.trabajador}`} url={`/api/personal/entregas/${anular.id}/anular`}
                 onClose={() => setAnular(null)} onSaved={() => { setAnular(null); avisar('Entrega anulada.'); cargar(); }} />}
         </div>
@@ -649,17 +679,31 @@ const EntregaModal = ({ inicial, opciones, trabajadores, onClose, onSaved }) => 
     );
 };
 
+// Fechas de la ultima devolucion y de la ultima baja de una entrega (con lo devuelto / dado de baja).
+const FechasMovimiento = ({ e }) => (
+    <>
+        {e.fecha_devolucion && <p>Devolución: {fecha(e.fecha_devolucion)} ({cant(e.devuelta)})</p>}
+        {e.fecha_baja && <p className="text-rose-600">Baja: {fecha(e.fecha_baja)} ({cant(e.baja)})</p>}
+        {!e.fecha_devolucion && !e.fecha_baja && <span className="text-gray-300">—</span>}
+    </>
+);
+
 const DevolucionModal = ({ entrega, onClose, onSaved }) => {
-    const [form, setForm] = useState({ cantidad: String(entrega.pendiente), fecha: toPeruYmd(), estado: 'bueno', motivo: '' });
+    const [form, setForm] = useState({ tipo: 'devolucion', cantidad: String(entrega.pendiente), fecha: toPeruYmd(), estado: 'bueno', motivo: '' });
+    const [historial, setHistorial] = useState([]);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
+    useEffect(() => {
+        fetch(`/api/personal/entregas/${entrega.id}/movimientos`).then((r) => (r.ok ? r.json() : [])).then(setHistorial).catch(() => {});
+    }, [entrega.id]);
+    const esBaja = form.tipo === 'baja';
     const save = async (event) => {
         event.preventDefault();
         setSaving(true);
         setError('');
         try {
-            await readJson(await jsonPost(`/api/personal/entregas/${entrega.id}/devolver`, form), 'No se pudo registrar la devolución.');
-            onSaved();
+            await readJson(await jsonPost(`/api/personal/entregas/${entrega.id}/devolver`, form), esBaja ? 'No se pudo registrar la baja.' : 'No se pudo registrar la devolución.');
+            onSaved(form.tipo);
         } catch (e) {
             setError(e.message);
         } finally {
@@ -667,22 +711,38 @@ const DevolucionModal = ({ entrega, onClose, onSaved }) => {
         }
     };
     return (
-        <Modal title="Registrar devolución" subtitle={`${entrega.elemento_nombre} · ${entrega.trabajador} · pendiente ${cant(entrega.pendiente)}`} onClose={onClose}>
+        <Modal title="Registrar devolución o baja" subtitle={`${entrega.elemento_nombre} · ${entrega.trabajador} · pendiente ${cant(entrega.pendiente)}`} onClose={onClose}>
             <ErrorBox text={error} />
             <form onSubmit={save} className="space-y-4">
+                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Tipo de movimiento">
+                    {[['devolucion', 'Devolución', 'El trabajador devuelve el elemento.'], ['baja', 'Baja', 'El elemento se pierde, se daña o se descarta.']].map(([v, l, d]) => (
+                        <label key={v} className={`p-3 rounded-xl border cursor-pointer ${form.tipo === v ? 'bg-brand-50 border-brand-300' : 'bg-white border-gray-200'}`}>
+                            <input type="radio" name="tipo" className="sr-only" checked={form.tipo === v} onChange={() => setForm({ ...form, tipo: v, estado: v === 'baja' ? 'danado' : 'bueno' })} />
+                            <p className="font-black text-sm">{l}</p><p className="text-xs text-gray-500">{d}</p>
+                        </label>
+                    ))}
+                </div>
                 <div className="grid grid-cols-3 gap-3">
                     <Field label="Cantidad"><input type="number" min="0.01" max={entrega.pendiente} step="0.01" className="input" value={form.cantidad} onChange={(e) => setForm({ ...form, cantidad: e.target.value })} required /></Field>
-                    <Field label="Fecha"><input type="date" className="input" min={entrega.fecha} max={toPeruYmd()} value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} required /></Field>
+                    <Field label={esBaja ? 'Fecha de baja' : 'Fecha de devolución'}><input type="date" className="input" min={entrega.fecha} max={toPeruYmd()} value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} required /></Field>
                     <Field label="Estado">
                         <select className="input" value={form.estado} onChange={(e) => setForm({ ...form, estado: e.target.value })}>
                             {['bueno', 'regular', 'danado'].map((v) => <option key={v} value={v}>{ESTADO_ELEMENTO_LABEL[v]}</option>)}
                         </select>
                     </Field>
                 </div>
-                <Field label="Motivo"><input className="input" value={form.motivo} onChange={(e) => setForm({ ...form, motivo: e.target.value })} required minLength={3} maxLength={500} placeholder="Ej. Cese, cambio de talla, desgaste" autoFocus /></Field>
+                <Field label="Motivo"><input className="input" value={form.motivo} onChange={(e) => setForm({ ...form, motivo: e.target.value })} required minLength={3} maxLength={500} placeholder={esBaja ? 'Ej. Pérdida, rotura, desgaste total' : 'Ej. Cese, cambio de talla'} autoFocus /></Field>
+                {historial.length > 0 && (
+                    <div className="text-xs border border-gray-100 rounded-xl p-3 space-y-1">
+                        <p className="font-black uppercase tracking-widest text-gray-500 text-[10px]">Historial</p>
+                        {historial.map((h) => (
+                            <p key={h.id}>{fecha(h.fecha)} · <strong>{h.tipo === 'baja' ? 'Baja' : 'Devolución'}</strong> {cant(h.cantidad)} · {ESTADO_ELEMENTO_LABEL[h.estado] || h.estado} · {h.motivo}{h.usuario_nombre ? ` · ${h.usuario_nombre}` : ''}</p>
+                        ))}
+                    </div>
+                )}
                 <div className="flex gap-3">
                     <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Cancelar</button>
-                    <button type="submit" className="btn btn-primary flex-1" disabled={saving}>{saving ? 'Guardando...' : 'Registrar devolución'}</button>
+                    <button type="submit" className="btn btn-primary flex-1" disabled={saving}>{saving ? 'Guardando...' : esBaja ? 'Registrar baja' : 'Registrar devolución'}</button>
                 </div>
             </form>
         </Modal>
@@ -1017,9 +1077,9 @@ const ElementosTab = ({ opciones, recargarOpciones, sede, avisar, setError }) =>
 };
 
 // ---------------- Costos ----------------
+// Como el sistema concesionario: solo el valor total de EPP y uniformes vigentes (en poder del trabajador) por trabajador y por área.
 const CostosTab = ({ opciones, sede, setError }) => {
-    const hoy = toPeruYmd();
-    const [filtros, setFiltros] = useState({ desde: startOfMonthYmd(hoy), hasta: hoy, area_id: '' });
+    const [filtros, setFiltros] = useState({ desde: '', hasta: '', area_id: '' });
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
 
@@ -1027,7 +1087,7 @@ const CostosTab = ({ opciones, sede, setError }) => {
         setLoading(true);
         try {
             const qs = new URLSearchParams(Object.entries(f).filter(([, v]) => v)).toString();
-            setData(await readJson(await fetch(`/api/personal/costos?${qs}`), 'No se pudo calcular los costos.'));
+            setData(await readJson(await fetch(`/api/personal/costos${qs ? `?${qs}` : ''}`), 'No se pudo calcular los costos.'));
         } catch (e) {
             setError(e.message);
         } finally {
@@ -1036,14 +1096,13 @@ const CostosTab = ({ opciones, sede, setError }) => {
     }, [filtros, setError]);
     useEffect(() => { cargar(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const conRem = data?.incluye_remuneracion;
     const total = (data?.areas || []).reduce((acc, a) => acc + a.costo_total, 0);
 
     return (
         <div className="space-y-4">
             <form className="card p-4 grid grid-cols-2 sm:grid-cols-[1fr_1fr_1fr_auto_auto] gap-3 items-end" onSubmit={(e) => { e.preventDefault(); cargar(); }}>
-                <Field label="Desde"><input type="date" className="input" value={filtros.desde} max={filtros.hasta} onChange={(e) => setFiltros({ ...filtros, desde: e.target.value })} required /></Field>
-                <Field label="Hasta"><input type="date" className="input" value={filtros.hasta} min={filtros.desde} onChange={(e) => setFiltros({ ...filtros, hasta: e.target.value })} required /></Field>
+                <Field label="Entregado desde (opcional)"><input type="date" className="input" value={filtros.desde} max={filtros.hasta || undefined} onChange={(e) => setFiltros({ ...filtros, desde: e.target.value })} /></Field>
+                <Field label="Entregado hasta (opcional)"><input type="date" className="input" value={filtros.hasta} min={filtros.desde || undefined} onChange={(e) => setFiltros({ ...filtros, hasta: e.target.value })} /></Field>
                 <Field label="Área">
                     <select className="input" value={filtros.area_id} onChange={(e) => setFiltros({ ...filtros, area_id: e.target.value })}>
                         <option value="">Todas</option>
@@ -1054,7 +1113,7 @@ const CostosTab = ({ opciones, sede, setError }) => {
                 <BotonExcel disabled={!data?.trabajadores?.length} onClick={() => exportarCostos(sede, data).catch((e) => setError(e.message))} />
             </form>
             <p className="text-xs text-gray-500">
-                {conRem ? 'Remuneración mensual prorrateada por los días vinculados en el periodo (días / 30) + ' : ''}costo de EPP y uniformes entregados en el periodo (sin anuladas).
+                Valor de los uniformes y EPP que cada trabajador tiene en su poder: lo entregado menos lo devuelto y lo dado de baja (sin entregas anuladas).
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -1062,35 +1121,28 @@ const CostosTab = ({ opciones, sede, setError }) => {
                     <div key={a.area} className="card p-4">
                         <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">{a.area} · {a.trabajadores} trab.</p>
                         <p className="text-2xl font-display font-black text-brand-600 tabular-nums">{money(a.costo_total)}</p>
-                        <p className="text-xs text-gray-500">EPP {money(a.costo_epp)} · Uniformes {money(a.costo_uniforme)}{conRem ? ` · Rem. ${money(a.remuneracion_periodo)}` : ''}</p>
+                        <p className="text-xs text-gray-500">EPP {money(a.costo_epp)} · Uniformes {money(a.costo_uniforme)}</p>
                     </div>
                 ))}
             </div>
 
-            <Tabla minWidth={900} head={<>
-                <Th>Trabajador</Th><Th>Área / cargo</Th><Th right>Días</Th>
-                {conRem && <><Th right>Rem. mensual</Th><Th right>Rem. periodo</Th></>}
-                <Th right>EPP</Th><Th right>Uniformes</Th><Th right>Total</Th>
+            <Tabla minWidth={760} head={<>
+                <Th>Trabajador</Th><Th>Área / cargo</Th><Th right>EPP</Th><Th right>Uniformes</Th><Th right>Total EPP y uniforme</Th>
             </>}>
-                {loading && <Vacio cols={8} text="Calculando..." />}
+                {loading && <Vacio cols={5} text="Calculando..." />}
                 {!loading && (data?.trabajadores || []).map((t) => (
-                    <tr key={t.personal_id} className="border-b border-gray-100">
+                    <tr key={`${t.personal_id}-${t.area_id}`} className="border-b border-gray-100">
                         <td className="px-4 py-3"><p className="font-bold">{t.trabajador}</p><p className="text-xs text-gray-500">DNI {t.dni} · {ESTADO_LABEL[t.estado]}</p></td>
                         <td className="px-4 py-3"><p>{t.area}</p><p className="text-xs text-gray-500">{t.cargo || '—'}</p></td>
-                        <td className="px-4 py-3 text-right">{t.dias}</td>
-                        {conRem && <>
-                            <td className="px-4 py-3 text-right tabular-nums">{t.remuneracion === null ? '—' : money(t.remuneracion)}</td>
-                            <td className="px-4 py-3 text-right tabular-nums">{money(t.remuneracion_periodo)}</td>
-                        </>}
                         <td className="px-4 py-3 text-right tabular-nums">{money(t.costo_epp)}</td>
                         <td className="px-4 py-3 text-right tabular-nums">{money(t.costo_uniforme)}</td>
                         <td className="px-4 py-3 text-right tabular-nums font-black">{money(t.costo_total)}</td>
                     </tr>
                 ))}
-                {!loading && data?.trabajadores?.length === 0 && <Vacio cols={8} text="No hay trabajadores vinculados en el periodo." />}
+                {!loading && data?.trabajadores?.length === 0 && <Vacio cols={5} text="Ningún trabajador tiene uniformes o EPP vigentes con esos filtros." />}
                 {!loading && data?.trabajadores?.length > 0 && (
                     <tr className="bg-gray-50 font-black">
-                        <td className="px-4 py-3" colSpan={conRem ? 7 : 5}>Total</td>
+                        <td className="px-4 py-3" colSpan={4}>Total</td>
                         <td className="px-4 py-3 text-right tabular-nums">{money(total)}</td>
                     </tr>
                 )}

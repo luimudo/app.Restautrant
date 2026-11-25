@@ -8,6 +8,7 @@ const facturacion = require('./facturacion');
 const formatos = require('./formatosComprobante');
 const { hashPassword, isHashed, verifyPassword, signToken, verifyToken } = require('./auth');
 const permisos = require('./permisos');
+const personal = require('./personal');
 
 dotenv.config();
 
@@ -422,8 +423,9 @@ app.post('/api/permisos/perfiles', allowAdmin, async (req, res) => {
             'INSERT INTO perfiles (codigo, nombre, descripcion, base, alcance, sistema) VALUES (?, ?, ?, ?, ?, 0)',
             [codigo, nombre, descripcion, base, alcance]
         );
-        if (copiarDe && copiarDe.modulos.size > 0) {
-            await pool.query('INSERT INTO perfil_modulos (perfil, modulo) VALUES ?', [[...copiarDe.modulos].map((m) => [codigo, m])]);
+        const copiados = copiarDe ? [...copiarDe.modulos].filter((m) => isSuperadmin(req) || m !== 'permisos') : [];
+        if (copiados.length > 0) {
+            await pool.query('INSERT INTO perfil_modulos (perfil, modulo) VALUES ?', [copiados.map((m) => [codigo, m])]);
         }
         await permisos.recargar();
         res.status(201).json(perfilPublico(permisos.get(codigo), await perfilesConUsuarios()));
@@ -442,6 +444,10 @@ app.put('/api/permisos/perfiles/:codigo', allowAdmin, async (req, res) => {
     // Without settings the administrador could not open this screen again.
     if (modulos && perfil.codigo === 'administrador' && !modulos.includes('settings')) {
         return res.status(409).json({ error: 'El administrador debe conservar el modulo de configuracion' });
+    }
+    // Solo el super admin decide quien entra a esta pantalla de perfiles y permisos.
+    if (modulos && !isSuperadmin(req) && modulos.includes('permisos') !== perfil.modulos.has('permisos')) {
+        return res.status(403).json({ error: 'Solo el super administrador otorga o quita el acceso a Perfiles y permisos' });
     }
     const nombre = req.body?.nombre !== undefined ? String(req.body.nombre).trim().replace(/\s+/g, ' ').slice(0, 60) : perfil.nombre;
     if (!nombre) return res.status(400).json({ error: 'Ingrese el nombre del perfil' });
@@ -662,9 +668,13 @@ app.delete('/api/usuarios/:id', allowAdmin, async (req, res) => {
 });
 
 // --- Clientes (compartidos entre sedes) ---
+// Por defecto solo los activos (selectores de facturacion, delivery, etc.); ?todos=1 incluye los desactivados (pantalla Clientes).
+// Hasta que exista clientes.activo (se crea al iniciar) se listan todos.
+let tieneClienteActivo = false;
 app.get('/api/clientes', allowAnyProfile, async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM clientes');
+        const todos = req.query.todos === '1' || !tieneClienteActivo;
+        const [rows] = await pool.query(`SELECT * FROM clientes ${todos ? '' : 'WHERE activo = 1'} ORDER BY nombre`);
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -747,6 +757,66 @@ app.post('/api/clientes', allowAdminWaiterCashier, async (req, res) => {
         );
         res.json({ ...req.body, id: result.insertId });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/clientes/:id', allowAdminWaiterCashier, async (req, res) => {
+    const nombre = String(req.body.nombre ?? '').trim().slice(0, 200);
+    if (!nombre) return res.status(400).json({ error: 'El nombre del cliente es obligatorio' });
+    const texto = (valor, max) => String(valor ?? '').trim().slice(0, max) || null;
+    const tipoDocumento = ['DNI', 'RUC', 'CE', 'PAS'].includes(req.body.tipo_documento) ? req.body.tipo_documento : null;
+    try {
+        const [result] = await pool.query(
+            'UPDATE clientes SET nombre = ?, telefono = ?, email = ?, documento = ?, tipo_documento = ?, direccion = ? WHERE id = ?',
+            [nombre, texto(req.body.telefono, 30), texto(req.body.email, 150), texto(req.body.documento, 20), tipoDocumento, texto(req.body.direccion, 255), req.params.id]
+        );
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Cliente no encontrado' });
+        res.json({ message: 'Cliente actualizado' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.patch('/api/clientes/:id/estado', allowAdminWaiterCashier, async (req, res) => {
+    const activo = req.body.activo ? 1 : 0;
+    try {
+        const [result] = await pool.query('UPDATE clientes SET activo = ? WHERE id = ?', [activo, req.params.id]);
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Cliente no encontrado' });
+        res.json({ message: activo ? 'Cliente activado' : 'Cliente desactivado', activo });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Solo se elimina un cliente sin pedidos, deliverys ni comprobantes; si tiene alguno se responde 409 para que se desactive.
+app.delete('/api/clientes/:id', allowAdminWaiterCashier, async (req, res) => {
+    try {
+        const [[refs]] = await pool.query(
+            `SELECT (SELECT COUNT(*) FROM pedidos WHERE cliente_id = ?) AS pedidos,
+                    (SELECT COUNT(*) FROM pedidos_delivery WHERE cliente_id = ?) AS deliverys,
+                    (SELECT COUNT(*) FROM facturas WHERE cliente_id = ?) AS comprobantes`,
+            [req.params.id, req.params.id, req.params.id]
+        );
+        const detalle = [
+            refs.pedidos > 0 && `${refs.pedidos} pedido(s)`,
+            refs.deliverys > 0 && `${refs.deliverys} delivery(s)`,
+            refs.comprobantes > 0 && `${refs.comprobantes} comprobante(s)`
+        ].filter(Boolean);
+        if (detalle.length > 0) {
+            return res.status(409).json({
+                error: `No se puede eliminar: el cliente tiene ${detalle.join(', ')} registrados. Solo se puede desactivar.`,
+                referencias: refs,
+                puede_desactivar: true
+            });
+        }
+        const [result] = await pool.query('DELETE FROM clientes WHERE id = ?', [req.params.id]);
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Cliente no encontrado' });
+        res.json({ message: 'Cliente eliminado' });
+    } catch (err) {
+        if (err.code === 'ER_ROW_IS_REFERENCED_2' || err.code === 'ER_ROW_IS_REFERENCED') {
+            return res.status(409).json({ error: 'No se puede eliminar: el cliente tiene registros asociados. Solo se puede desactivar.', puede_desactivar: true });
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -904,9 +974,99 @@ const buildCashSessionSummary = async (connection, sessionId, sedeId) => {
 };
 
 // --- Cajas ---
+// Observaciones nov. 2026: cada caja se asocia a sede, almacen y usuarios (varios, uno por turno). Solo el administrador,
+// el contador con el modulo Facturacion y el super admin operan todas las cajas; los demas usuarios solo ven y operan las
+// cajas que tienen asignadas (abrir, cerrar, movimientos, arqueos y ventas).
+let tieneCajaUsuarios = false;
+const CAJA_AJENA = 'Esta caja no esta asignada a su usuario: solo puede operar las cajas que le asigno el administrador';
+const operaTodasLasCajas = (req) => {
+    const ctx = req.userContext;
+    if (!ctx) return false;
+    if (ctx.perfil === SUPERADMIN || ctx.perfil === 'administrador') return true;
+    return ctx.perfil === 'contador' && ctx.modulos.has('billing');
+};
+/** null = todas las cajas; si no, los ids de las cajas asignadas al usuario. */
+const cajasDelUsuario = async (connection, req) => {
+    if (operaTodasLasCajas(req) || !tieneCajaUsuarios) return null;
+    const [rows] = await connection.query('SELECT caja_id FROM caja_usuarios WHERE usuario_id = ?', [req.userContext.id]);
+    return rows.map((r) => Number(r.caja_id));
+};
+const puedeOperarCaja = async (connection, req, cajaId) => {
+    const ids = await cajasDelUsuario(connection, req);
+    return ids === null || ids.includes(Number(cajaId));
+};
+/** Para rutas por sesion: true si la sesion no existe (la ruta responde 404) o si su caja es del usuario. */
+const puedeOperarSesion = async (connection, req, sesionId) => {
+    const [rows] = await connection.query('SELECT caja_id FROM caja_sesiones WHERE id = ?', [sesionId]);
+    return !rows[0] || puedeOperarCaja(connection, req, rows[0].caja_id);
+};
+/** Usuarios de cada caja, para el mantenimiento de cajas. */
+const usuariosDeCajas = async (cajaIds) => {
+    if (!tieneCajaUsuarios || cajaIds.length === 0) return new Map();
+    const [rows] = await pool.query(
+        `SELECT cu.caja_id, u.id, u.nombre, u.usuario, u.rol AS perfil FROM caja_usuarios cu JOIN usuarios u ON u.id = cu.usuario_id
+         WHERE cu.caja_id IN (?) ORDER BY u.nombre`, [cajaIds]);
+    const mapa = new Map();
+    for (const r of rows) {
+        if (!mapa.has(r.caja_id)) mapa.set(r.caja_id, []);
+        mapa.get(r.caja_id).push({ id: r.id, nombre: r.nombre, usuario: r.usuario, perfil: r.perfil });
+    }
+    return mapa;
+};
+/** Valida y guarda los usuarios de una caja (solo usuarios de la misma sede). Sin usuario_ids en el cuerpo no cambia nada. */
+const guardarUsuariosCaja = async (connection, cajaId, sedeId, usuarioIds) => {
+    if (!tieneCajaUsuarios || !Array.isArray(usuarioIds)) return;
+    const ids = [...new Set(usuarioIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    if (ids.length > 0) {
+        const [validos] = await connection.query('SELECT id FROM usuarios WHERE id IN (?) AND sede_id = ?', [ids, sedeId]);
+        if (validos.length !== ids.length) throw httpError(400, 'Solo puede asignar usuarios de la misma sede a la caja');
+    }
+    await connection.query('DELETE FROM caja_usuarios WHERE caja_id = ?', [cajaId]);
+    if (ids.length > 0) await connection.query('INSERT INTO caja_usuarios (caja_id, usuario_id) VALUES ?', [ids.map((u) => [cajaId, u])]);
+};
+
+// R-02: varias cajas por sede; cada una vende desde su almacen (sin almacen: el de ventas por defecto de la sede).
+// ?todas=1 incluye las inactivas (pantalla de mantenimiento); por defecto solo las activas.
 app.get('/api/cajas', allowAdminOrCashier, requireSede, async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM cajas WHERE sede_id = ?', [sedeOf(req)]);
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (permitidas !== null && permitidas.length === 0) return res.json([]);
+        const filtro = permitidas === null ? '' : ' AND c.id IN (?)';
+        const [rows] = await pool.query(
+            tieneCajaAlmacen
+                ? `SELECT c.*, a.nombre AS almacen_nombre, a.codigo AS almacen_codigo,
+                          (SELECT s.id FROM caja_sesiones s WHERE s.caja_id = c.id AND s.estado = 'abierta' LIMIT 1) AS sesion_abierta_id
+                   FROM cajas c LEFT JOIN almacenes a ON a.id = c.almacen_id
+                   WHERE c.sede_id = ? ${req.query.todas ? '' : 'AND c.activo = 1'}${filtro} ORDER BY c.activo DESC, c.descripcion ASC`
+                : `SELECT * FROM cajas c WHERE c.sede_id = ?${filtro}`,
+            permitidas === null ? [sedeOf(req)] : [sedeOf(req), permitidas]
+        );
+        const usuarios = await usuariosDeCajas(rows.map((c) => c.id));
+        res.json(rows.map((c) => ({ ...c, usuarios: usuarios.get(c.id) || [] })));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/** Validates the caja form: description and an active warehouse of the same sede (optional). */
+const parseCajaInput = async (connection, body, sedeId) => {
+    const descripcion = String(body?.descripcion ?? '').trim().replace(/\s+/g, ' ');
+    if (descripcion.length < 3 || descripcion.length > 100) throw httpError(400, 'La descripcion de la caja debe tener entre 3 y 100 caracteres');
+    let almacenId = body?.almacen_id ? Number(body.almacen_id) : null;
+    if (almacenId) {
+        const [rows] = await connection.query('SELECT id FROM almacenes WHERE id = ? AND sede_id = ? AND activo = 1', [almacenId, sedeId]);
+        if (rows.length === 0) throw httpError(400, 'El almacen debe ser un almacen activo de la misma sede');
+    } else {
+        almacenId = null;
+    }
+    const activo = body?.activo === undefined ? 1 : (body.activo && body.activo !== '0' ? 1 : 0);
+    return { descripcion, almacenId, activo };
+};
+
+// Usuarios de la sede que se pueden asignar a una caja (mantenimiento de cajas).
+app.get('/api/cajas/usuarios-asignables', allowAdmin, requireSede, async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT id, nombre, usuario, rol AS perfil FROM usuarios WHERE sede_id = ? ORDER BY nombre', [sedeOf(req)]);
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -914,15 +1074,66 @@ app.get('/api/cajas', allowAdminOrCashier, requireSede, async (req, res) => {
 });
 
 app.post('/api/cajas', allowAdmin, requireSede, async (req, res) => {
-    const { descripcion, saldo, estado } = req.body;
     try {
-        const [result] = await pool.query(
-            'INSERT INTO cajas (sede_id, descripcion, saldo, estado) VALUES (?, ?, ?, ?)',
-            [sedeOf(req), descripcion, saldo || 0, estado || 'cerrada']
-        );
-        res.json({ ...req.body, id: result.insertId });
+        const sedeId = sedeOf(req);
+        if (!tieneCajaAlmacen) {
+            const descripcion = String(req.body?.descripcion ?? '').trim();
+            if (descripcion.length < 3) return res.status(400).json({ error: 'Ingrese la descripcion de la caja' });
+            const [result] = await pool.query('INSERT INTO cajas (sede_id, descripcion, saldo, estado) VALUES (?, ?, 0, ?)', [sedeId, descripcion, 'cerrada']);
+            return res.status(201).json({ id: result.insertId, sede_id: sedeId, descripcion, estado: 'cerrada' });
+        }
+        const data = await parseCajaInput(pool, req.body, sedeId);
+        const [dup] = await pool.query('SELECT id FROM cajas WHERE sede_id = ? AND descripcion = ?', [sedeId, data.descripcion]);
+        if (dup.length > 0) return res.status(409).json({ error: 'Ya existe una caja con esa descripcion en la sede' });
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            const [result] = await connection.query(
+                'INSERT INTO cajas (sede_id, descripcion, saldo, estado, almacen_id, activo) VALUES (?, ?, 0, ?, ?, ?)',
+                [sedeId, data.descripcion, 'cerrada', data.almacenId, data.activo]
+            );
+            await guardarUsuariosCaja(connection, result.insertId, sedeId, req.body?.usuario_ids);
+            await connection.commit();
+            res.status(201).json({ id: result.insertId, sede_id: sedeId, descripcion: data.descripcion, estado: 'cerrada', almacen_id: data.almacenId, activo: data.activo });
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
+app.put('/api/cajas/:id', allowAdmin, requireSede, async (req, res) => {
+    if (!tieneCajaAlmacen) return res.status(503).json({ error: 'La base de datos aun no tiene las columnas de cajas: reinicie la aplicacion' });
+    try {
+        const sedeId = sedeOf(req);
+        const [rows] = await pool.query('SELECT id FROM cajas WHERE id = ? AND sede_id = ?', [req.params.id, sedeId]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Caja no encontrada' });
+        const data = await parseCajaInput(pool, req.body, sedeId);
+        const [dup] = await pool.query('SELECT id FROM cajas WHERE sede_id = ? AND descripcion = ? AND id <> ?', [sedeId, data.descripcion, req.params.id]);
+        if (dup.length > 0) return res.status(409).json({ error: 'Ya existe una caja con esa descripcion en la sede' });
+        if (!data.activo) {
+            const [abiertas] = await pool.query("SELECT id FROM caja_sesiones WHERE caja_id = ? AND estado = 'abierta' LIMIT 1", [req.params.id]);
+            if (abiertas.length > 0) return res.status(409).json({ error: 'La caja tiene una sesion abierta: cierrela antes de desactivarla' });
+        }
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            await connection.query('UPDATE cajas SET descripcion = ?, almacen_id = ?, activo = ? WHERE id = ?', [data.descripcion, data.almacenId, data.activo, req.params.id]);
+            await guardarUsuariosCaja(connection, Number(req.params.id), sedeId, req.body?.usuario_ids);
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+        res.json({ id: Number(req.params.id), descripcion: data.descripcion, almacen_id: data.almacenId, activo: data.activo });
+    } catch (err) {
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 
@@ -930,13 +1141,17 @@ app.get('/api/caja/sesion-activa', allowAdminOrCashier, requireSede, async (req,
     const cajaId = req.query.caja_id ? Number(req.query.caja_id) : null;
     const sedeId = sedeOf(req);
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (cajaId && permitidas !== null && !permitidas.includes(cajaId)) return res.status(403).json({ error: CAJA_AJENA });
+        if (!cajaId && permitidas !== null && permitidas.length === 0) return res.json(null);
+        const filtro = cajaId ? 'AND caja_id = ?' : permitidas !== null ? 'AND caja_id IN (?)' : '';
         const [rows] = await pool.query(`
             SELECT id
             FROM caja_sesiones
-            WHERE estado = 'abierta' AND sede_id = ? ${cajaId ? 'AND caja_id = ?' : ''}
+            WHERE estado = 'abierta' AND sede_id = ? ${filtro}
             ORDER BY fecha_apertura DESC
             LIMIT 1
-        `, cajaId ? [sedeId, cajaId] : [sedeId]);
+        `, cajaId ? [sedeId, cajaId] : permitidas !== null ? [sedeId, permitidas] : [sedeId]);
 
         if (rows.length === 0) {
             return res.json(null);
@@ -952,11 +1167,14 @@ app.get('/api/caja/sesion-activa', allowAdminOrCashier, requireSede, async (req,
 // Open sessions of the sede, one per caja: the sale picks the caja it is registered in.
 app.get('/api/caja/sesiones-abiertas', allowAdminOrCashier, requireSede, async (req, res) => {
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (permitidas !== null && permitidas.length === 0) return res.json([]);
         const [rows] = await pool.query(
-            `SELECT s.id, s.caja_id, c.descripcion AS caja_descripcion, s.fecha_apertura
+            `SELECT s.id, s.caja_id, c.descripcion AS caja_descripcion, s.fecha_apertura${tieneCajaAlmacen ? ', a.nombre AS almacen_nombre' : ''}
              FROM caja_sesiones s JOIN cajas c ON c.id = s.caja_id
-             WHERE s.sede_id = ? AND s.estado = 'abierta' ORDER BY c.descripcion ASC`,
-            [sedeOf(req)]
+             ${tieneCajaAlmacen ? 'LEFT JOIN almacenes a ON a.id = c.almacen_id' : ''}
+             WHERE s.sede_id = ? AND s.estado = 'abierta'${permitidas === null ? '' : ' AND s.caja_id IN (?)'} ORDER BY c.descripcion ASC`,
+            permitidas === null ? [sedeOf(req)] : [sedeOf(req), permitidas]
         );
         res.json(rows);
     } catch (err) {
@@ -975,16 +1193,26 @@ app.post('/api/caja/apertura', allowAdminOrCashier, requireSede, async (req, res
     if (!cajaId) {
         return res.status(400).json({ error: 'caja_id es obligatorio' });
     }
+    try {
+        if (!(await puedeOperarCaja(pool, req, cajaId))) return res.status(403).json({ error: CAJA_AJENA });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
 
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
 
         // Locking the caja row serialises concurrent openings of the same register.
-        const [cajaRows] = await connection.query('SELECT id FROM cajas WHERE id = ? AND sede_id = ? LIMIT 1 FOR UPDATE', [cajaId, sedeId]);
+        const [cajaRows] = await connection.query(
+            `SELECT id${tieneCajaAlmacen ? ', activo' : ''} FROM cajas WHERE id = ? AND sede_id = ? LIMIT 1 FOR UPDATE`, [cajaId, sedeId]);
         if (cajaRows.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Caja no encontrada' });
+        }
+        if (tieneCajaAlmacen && !Number(cajaRows[0].activo)) {
+            await connection.rollback();
+            return res.status(409).json({ error: 'La caja esta desactivada' });
         }
 
         const [activeRows] = await connection.query(
@@ -1020,6 +1248,7 @@ app.get('/api/caja/resumen/:sesionId', allowAdminOrCashier, requireSede, async (
     const sessionId = Number(req.params.sesionId);
     if (!sessionId) return res.status(400).json({ error: 'sesionId invalido' });
     try {
+        if (!(await puedeOperarSesion(pool, req, sessionId))) return res.status(403).json({ error: CAJA_AJENA });
         const summary = await buildCashSessionSummary(pool, sessionId, sedeOf(req));
         if (!summary) return res.status(404).json({ error: 'Sesion no encontrada' });
         res.json(summary);
@@ -1152,6 +1381,12 @@ app.get('/api/caja/sesiones', allowAdminOrCashier, requireSede, async (req, res)
     const params = [sedeOf(req), desde, hasta];
     if (Number(req.query.caja_id)) { conditions.push('s.caja_id = ?'); params.push(Number(req.query.caja_id)); }
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (permitidas !== null) {
+            if (permitidas.length === 0) return res.json({ periodo: { desde, hasta }, sesiones: [] });
+            conditions.push('s.caja_id IN (?)');
+            params.push(permitidas);
+        }
         const [rows] = await pool.query(
             `SELECT s.id, s.caja_id, ${(await sesionesConTurno()) ? 's.turno,' : ''} c.descripcion AS caja_descripcion, s.estado, s.fecha_apertura, s.fecha_cierre, s.monto_inicial,
                     s.monto_teorico_cierre, s.monto_contado_cierre, s.diferencia,
@@ -1174,6 +1409,7 @@ app.get('/api/caja/sesiones/:id/informe', allowAdminOrCashier, requireSede, asyn
     const sessionId = Number(req.params.id);
     if (!sessionId) return res.status(400).json({ error: 'Sesion invalida' });
     try {
+        if (!(await puedeOperarSesion(pool, req, sessionId))) return res.status(403).json({ error: CAJA_AJENA });
         const informe = await armarInformeCaja(pool, sessionId, sedeOf(req));
         if (!informe) return res.status(404).json({ error: 'Sesion no encontrada' });
         res.json(informe);
@@ -1209,6 +1445,10 @@ app.post('/api/caja/movimiento-manual', allowAdminOrCashier, requireSede, async 
         }
 
         const session = sessionRows[0];
+        if (!(await puedeOperarCaja(connection, req, session.caja_id))) {
+            await connection.rollback();
+            return res.status(403).json({ error: CAJA_AJENA });
+        }
         if (session.estado !== 'abierta') {
             await connection.rollback();
             return res.status(409).json({ error: 'La sesion ya esta cerrada' });
@@ -1253,6 +1493,10 @@ app.post('/api/caja/cierre', allowAdminOrCashier, requireSede, async (req, res) 
         if (!summary) {
             await connection.rollback();
             return res.status(404).json({ error: 'Sesion no encontrada' });
+        }
+        if (!(await puedeOperarCaja(connection, req, summary.caja_id))) {
+            await connection.rollback();
+            return res.status(403).json({ error: CAJA_AJENA });
         }
         if (summary.estado !== 'abierta') {
             await connection.rollback();
@@ -1300,6 +1544,10 @@ app.post('/api/cajas/:id/movimientos', allowAdminOrCashier, requireSede, async (
         if (cajaRows.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Caja no encontrada' });
+        }
+        if (!(await puedeOperarCaja(connection, req, caja_id))) {
+            await connection.rollback();
+            return res.status(403).json({ error: CAJA_AJENA });
         }
 
         const [activeSessionRows] = await connection.query(
@@ -1569,18 +1817,42 @@ let tieneFactorVenta = false;
 // True once productos.costo_unitario exists (se crea al iniciar).
 let tieneCostoProducto = false;
 
-const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usuarioId) => {
+// True once productos.producto_base_id exists (se crea al iniciar): presentations (vaso 0.3 L, jarra 1.5 L) that take litres from a keg.
+let tieneProductoBase = false;
+// True once cajas.almacen_id / cajas.activo exist (se crean al iniciar): each register sells from its own warehouse.
+let tieneCajaAlmacen = false;
+
+/** Product whose stock a sold product moves: its base product (keg) for a presentation, else itself. */
+const productoStockSql = () => (tieneProductoBase ? 'COALESCE(p.producto_base_id, p.id)' : 'p.id');
+
+/** Warehouse a register sells from (null when it has none: the sede's default sales warehouse is used). */
+const almacenDeCaja = async (connection, cajaId) => {
+    if (!tieneCajaAlmacen || !cajaId) return null;
+    const [rows] = await connection.query(
+        `SELECT a.id FROM cajas c JOIN almacenes a ON a.id = c.almacen_id AND a.sede_id = c.sede_id AND a.activo = 1 WHERE c.id = ?`,
+        [cajaId]
+    );
+    return rows[0]?.id || null;
+};
+
+const almacenDeSesion = async (connection, sesionId) => {
+    if (!tieneCajaAlmacen || !sesionId) return null;
+    const [rows] = await connection.query('SELECT caja_id FROM caja_sesiones WHERE id = ?', [sesionId]);
+    return rows[0] ? almacenDeCaja(connection, rows[0].caja_id) : null;
+};
+
+const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usuarioId, almacenVentaId = null) => {
+    // Each line takes cantidad x factor_venta units of stock from its stock product (a presentation: litres of the keg).
     const [items] = await connection.query(
-        `SELECT dp.producto_id, ROUND(SUM(dp.cantidad) * ${tieneFactorVenta ? 'MAX(p.factor_venta)' : '1'}, 3) AS cantidad
+        `SELECT ${productoStockSql()} AS producto_id, ROUND(SUM(dp.cantidad * ${tieneFactorVenta ? 'p.factor_venta' : '1'}), 3) AS cantidad
          FROM detalles_pedido dp
          JOIN productos p ON p.id = dp.producto_id
-         LEFT JOIN tipos_producto tp ON tp.id = p.tipo_id
-         WHERE dp.pedido_id = ? AND p.es_receta = 0
-         GROUP BY dp.producto_id`,
+         WHERE dp.pedido_id = ? AND (p.es_receta = 0${tieneProductoBase ? ' OR p.producto_base_id IS NOT NULL' : ''})
+         GROUP BY ${productoStockSql()}`,
         [pedidoId]
     );
     if (items.length === 0) return;
-    const almacenId = await almacenPorDefecto(connection, sedeId, 'ventas');
+    const almacenId = almacenVentaId || await almacenPorDefecto(connection, sedeId, 'ventas');
     for (const item of items) {
         const cantidad = Number(item.cantidad);
         await adjustStockAlmacen(connection, 'producto', almacenId, sedeId, item.producto_id, -cantidad);
@@ -1592,6 +1864,30 @@ const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usu
 };
 
 const setSupplyStock = (connection, sedeId, insumoId, stock) => setStockSede(connection, 'insumo', sedeId, insumoId, stock, 'compras');
+
+/**
+ * Costo promedio ponderado de un insumo o producto (bebida) ante una entrada con costo, sobre el stock de todos los almacenes
+ * tomado ANTES de que la entrada sume. Se guarda con 4 decimales: un insumo comprado por kg y llevado en gramos cuesta
+ * fracciones de centimo (S/ 12.50 el kg = S/ 0.0125 el g) y con 2 decimales el promedio se distorsionaba en cada compra.
+ * Devuelve el nuevo costo, o null si no aplica (sin cantidad o costo, o productos sin columna de costo).
+ */
+const actualizarCostoPromedio = async (connection, tipoItem, itemId, cantidad, costo) => {
+    if (!(Number(cantidad) > 0) || !(Number(costo) >= 0) || costo === null) return null;
+    if (tipoItem === 'producto' && !tieneCostoProducto) return null;
+    const [total] = await connection.query(tipoItem === 'insumo'
+        ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
+        : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
+    const [actual] = await connection.query(`SELECT costo_unitario FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} WHERE id = ? FOR UPDATE`, [itemId]);
+    const previo = Math.max(0, Number(total[0]?.stock || 0));
+    const costoPrevio = Number(actual[0]?.costo_unitario || 0);
+    // Sin stock previo (o sin costo previo registrado) el costo es el de la entrada.
+    const promedio = previo > 0 && costoPrevio > 0
+        ? ((previo * costoPrevio) + (Number(cantidad) * Number(costo))) / (previo + Number(cantidad))
+        : Number(costo);
+    const redondeado = Math.round(promedio * 10000) / 10000;
+    await connection.query(`UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`, [redondeado, itemId]);
+    return redondeado;
+};
 
 const adjustSupplyStock = async (connection, sedeId, insumoId, delta, almacenId = null) => adjustStockAlmacen(
     connection, 'insumo', almacenId || await almacenPorDefecto(connection, sedeId, 'compras'), sedeId, insumoId, delta
@@ -2040,7 +2336,7 @@ app.post('/api/compras', allowAdminKitchenForWrites, requireSede, async (req, re
                 const { factor, entero } = await unidadDeLinea(connection, 'insumo', insumoRows[0], item.unidad_id, insumoRows[0].nombre);
                 if (entero && !Number.isInteger(cantidadStock)) throw httpError(400, `${insumoRows[0].nombre} se compra en unidades enteras`);
                 cantidadStock = Math.round(cantidadStock * factor * 1000) / 1000;
-                costoStock = Math.round((costoStock / factor) * 100) / 100;
+                costoStock = Math.round((costoStock / factor) * 10000) / 10000;
                 unidadCompraId = item.unidad_id ? Number(item.unidad_id) : insumoRows[0].unidad_id;
             }
             await connection.query(
@@ -2056,25 +2352,14 @@ app.post('/api/compras', allowAdminKitchenForWrites, requireSede, async (req, re
                 [almacenIngresoId, sedeId, tipoItem, itemId, cantidad, `Compra #${compraId}`, req.userContext.id,
                     ...(conKardex ? [referenciaCompra, costoUnitario, Math.round(costoUnitario * cantidad * 100) / 100] : [])]
             );
+            // Costo promedio ponderado (insumos y bebidas) antes de sumar el stock de la compra.
             if (item.producto_id) {
+                await actualizarCostoPromedio(connection, 'producto', item.producto_id, Number(item.cantidad), Number(item.precio_unitario));
                 await adjustProductStock(connection, sedeId, item.producto_id, Number(item.cantidad), almacenIngresoId);
                 await registrarIngresoCompra('producto', item.producto_id, Number(item.cantidad), Number(item.precio_unitario));
             } else if (item.insumo_id) {
-                // Weighted average cost over the stock of the supply in every warehouse, taken before this purchase enters.
-                const [totales] = await connection.query(
-                    'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ? FOR UPDATE', [item.insumo_id]
-                );
-                const [actual] = await connection.query('SELECT costo_unitario FROM insumos WHERE id = ?', [item.insumo_id]);
-                const previo = Math.max(0, Number(totales[0].stock));
-                const costoPrevio = Number(actual[0]?.costo_unitario || 0);
-                const promedio = previo > 0 && cantidadStock > 0
-                    ? ((previo * costoPrevio) + (cantidadStock * costoStock)) / (previo + cantidadStock)
-                    : costoStock;
+                await actualizarCostoPromedio(connection, 'insumo', item.insumo_id, cantidadStock, costoStock);
                 await adjustSupplyStock(connection, sedeId, item.insumo_id, cantidadStock, almacenIngresoId);
-                await connection.query(
-                    'UPDATE insumos SET costo_unitario = ? WHERE id = ?',
-                    [Math.round(promedio * 100) / 100, item.insumo_id]
-                );
                 await registrarIngresoCompra('insumo', item.insumo_id, cantidadStock, costoStock);
             }
         }
@@ -2147,14 +2432,21 @@ app.delete('/api/categorias/:id', allowAdminKitchenForWrites, async (req, res) =
 });
 
 // --- Productos (carta compartida, stock por sede) ---
-const PRODUCT_SELECT_SQL = `
+// A presentation (vaso, jarra) has no stock of its own: it shows the stock of its base product (the keg, in litres).
+// Two placeholders: the sede id twice (own stock and base stock).
+const productSelectSql = () => `
     SELECT p.*, (SELECT COALESCE(SUM(sp.stock), 0) FROM stock_productos sp WHERE sp.producto_id = p.id AND sp.sede_id = ?) AS stock,
+           ${tieneProductoBase
+        ? `pb.nombre AS base_nombre, COALESCE(umb.abreviatura, 'Unidad') AS base_unidad,
+           (SELECT COALESCE(SUM(sb.stock), 0) FROM stock_productos sb WHERE sb.producto_id = p.producto_base_id AND sb.sede_id = ?) AS stock_base,`
+        : 'NULL AS producto_base_id, NULL AS base_nombre, NULL AS base_unidad, ? AS stock_base,'}
            t.nombre as tipo_nombre, t.es_barra, COALESCE(um.abreviatura, 'Unidad') AS unidad_medida, COALESCE(um.permite_decimales, 0) AS unidad_decimales,
            CASE WHEN EXISTS (SELECT 1 FROM producto_imagenes pi WHERE pi.producto_id = p.id)
                 THEN CONCAT('/api/productos/', p.id, '/imagen') ELSE NULL END AS imagen_url
     FROM productos p
     LEFT JOIN tipos_producto t ON p.tipo_id = t.id
     LEFT JOIN unidades_medida um ON um.id = p.unidad_id
+    ${tieneProductoBase ? 'LEFT JOIN productos pb ON pb.id = p.producto_base_id LEFT JOIN unidades_medida umb ON umb.id = pb.unidad_id' : ''}
 `;
 
 const parseProductImage = (dataUrl) => {
@@ -2200,7 +2492,7 @@ app.delete('/api/productos/:id/imagen', allowAdminKitchenForWrites, requireSede,
 
 app.get('/api/productos', allowAnyProfile, requireSede, async (req, res) => {
     try {
-        const [rows] = await pool.query(PRODUCT_SELECT_SQL, [sedeOf(req)]);
+        const [rows] = await pool.query(productSelectSql(), [sedeOf(req), tieneProductoBase ? sedeOf(req) : null]);
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -2209,7 +2501,7 @@ app.get('/api/productos', allowAnyProfile, requireSede, async (req, res) => {
 
 app.get('/api/productos/:id', allowAnyProfile, requireSede, async (req, res) => {
     try {
-        const [rows] = await pool.query(`${PRODUCT_SELECT_SQL} WHERE p.id = ?`, [sedeOf(req), req.params.id]);
+        const [rows] = await pool.query(`${productSelectSql()} WHERE p.id = ?`, [sedeOf(req), tieneProductoBase ? sedeOf(req) : null, req.params.id]);
         if (rows.length === 0) return res.status(404).json({ message: 'Producto no encontrado' });
         res.json(rows[0]);
     } catch (err) {
@@ -2236,20 +2528,53 @@ const parseCostoProducto = (valor) => {
     return costo;
 };
 
+/**
+ * Base product of a presentation (keg sold by glass/jug), or null. The base must keep stock, cannot be a presentation itself
+ * nor the same product; a product that already has presentations cannot become one.
+ */
+const parseProductoBase = async (connection, valor, productoId = null) => {
+    if (!tieneProductoBase || valor === undefined || valor === null || valor === '' || Number(valor) === 0) return null;
+    const baseId = Number(valor);
+    if (!Number.isInteger(baseId) || baseId < 1) throw httpError(400, 'El producto base no es valido');
+    if (productoId && baseId === Number(productoId)) throw httpError(400, 'Un producto no puede ser presentacion de si mismo');
+    const [rows] = await connection.query('SELECT id, nombre, es_receta, producto_base_id FROM productos WHERE id = ?', [baseId]);
+    const base = rows[0];
+    if (!base) throw httpError(400, 'El producto base no existe');
+    if (Number(base.es_receta)) throw httpError(400, `El producto base "${base.nombre}" debe controlar stock (desmarque "Sin stock")`);
+    if (base.producto_base_id) throw httpError(400, `"${base.nombre}" ya es una presentacion: elija el producto con el stock (barril)`);
+    if (productoId) {
+        const [hijos] = await connection.query('SELECT COUNT(*) AS total FROM productos WHERE producto_base_id = ?', [productoId]);
+        if (Number(hijos[0].total) > 0) throw httpError(400, 'Este producto tiene presentaciones: no puede ser presentacion de otro');
+    }
+    return baseId;
+};
+
+/** A product with presentations keeps the stock they take: it cannot be switched to "Sin stock". */
+const validarBaseConStock = async (connection, productoId, esReceta) => {
+    if (!tieneProductoBase || !productoId || !esReceta || esReceta === '0' || esReceta === 'false') return;
+    const [hijos] = await connection.query('SELECT COUNT(*) AS total FROM productos WHERE producto_base_id = ?', [productoId]);
+    if (Number(hijos[0].total) > 0) throw httpError(400, 'Este producto tiene presentaciones que descuentan de su stock: debe controlar stock');
+};
+
 app.post('/api/productos', allowAdminKitchenForWrites, requireSede, async (req, res) => {
-    const { nombre, descripcion, precio, tipo_id, es_receta, disponible, stock } = req.body;
+    const { nombre, descripcion, precio, tipo_id, disponible, stock } = req.body;
+    let { es_receta } = req.body;
     const connection = await pool.getConnection();
     try {
         const factorVenta = parseFactorVenta(req.body.factor_venta);
         const costoProducto = parseCostoProducto(req.body.costo_unitario);
         await connection.beginTransaction();
+        const productoBaseId = await parseProductoBase(connection, req.body.producto_base_id);
+        // A presentation has no stock of its own ("Sin stock"): its sale takes factor_venta units from the base product.
+        if (productoBaseId) es_receta = 1;
         const unidad = await resolverUnidad(connection, req.body);
         const [result] = await connection.query(
             `INSERT INTO productos (nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad_id${tieneFactorVenta ? ', factor_venta' : ''}) VALUES (?, ?, ?, ?, ?, ?, ?${tieneFactorVenta ? ', ?' : ''})`,
             [nombre, descripcion, precio, tipo_id, es_receta !== undefined ? es_receta : true, disponible !== undefined ? disponible : true, unidad.id, ...(tieneFactorVenta ? [factorVenta] : [])]
         );
         if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, result.insertId]);
-        await setProductStock(connection, sedeOf(req), result.insertId, stock);
+        if (productoBaseId) await connection.query('UPDATE productos SET producto_base_id = ? WHERE id = ?', [productoBaseId, result.insertId]);
+        else await setProductStock(connection, sedeOf(req), result.insertId, stock);
         await connection.commit();
         res.json({ ...req.body, id: result.insertId, unidad_id: unidad.id, unidad_medida: unidad.abreviatura });
     } catch (err) {
@@ -2261,7 +2586,8 @@ app.post('/api/productos', allowAdminKitchenForWrites, requireSede, async (req, 
 });
 
 app.put('/api/productos/:id', allowAdminKitchenForWrites, requireSede, async (req, res) => {
-    const { nombre, descripcion, precio, tipo_id, es_receta, disponible, stock } = req.body;
+    const { nombre, descripcion, precio, tipo_id, disponible, stock } = req.body;
+    let { es_receta } = req.body;
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
@@ -2269,12 +2595,20 @@ app.put('/api/productos/:id', allowAdminKitchenForWrites, requireSede, async (re
         const unidad = req.body.unidad_id || req.body.unidad_medida ? await resolverUnidad(connection, req.body) : null;
         const factorVenta = parseFactorVenta(req.body.factor_venta, null);
         const costoProducto = parseCostoProducto(req.body.costo_unitario);
+        // Clients that do not send producto_base_id (older screens) keep the current one.
+        const enviaBase = tieneProductoBase && Object.prototype.hasOwnProperty.call(req.body, 'producto_base_id');
+        const productoBaseId = enviaBase ? await parseProductoBase(connection, req.body.producto_base_id, req.params.id) : null;
+        const [actualRows] = tieneProductoBase ? await connection.query('SELECT producto_base_id FROM productos WHERE id = ?', [req.params.id]) : [[]];
+        const esPresentacion = enviaBase ? Boolean(productoBaseId) : Boolean(actualRows[0]?.producto_base_id);
+        if (esPresentacion) es_receta = 1;
+        else await validarBaseConStock(connection, req.params.id, es_receta);
         if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, req.params.id]);
         await connection.query(
             `UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id)${tieneFactorVenta ? ', factor_venta = COALESCE(?, factor_venta)' : ''} WHERE id = ?`,
             [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, ...(tieneFactorVenta ? [factorVenta] : []), req.params.id]
         );
-        await setProductStock(connection, sedeOf(req), req.params.id, stock);
+        if (enviaBase) await connection.query('UPDATE productos SET producto_base_id = ? WHERE id = ?', [productoBaseId, req.params.id]);
+        if (!esPresentacion) await setProductStock(connection, sedeOf(req), req.params.id, stock);
         await connection.commit();
         res.json({ message: 'Producto actualizado' });
     } catch (err) {
@@ -3252,11 +3586,16 @@ const upsertCliente = async (connection, cliente) => {
     return result.insertId;
 };
 
-/** Open session of the sede; with `cajaId` it is that register's own session (each caja is independent). */
-const openCashSession = async (connection, sedeId, cajaId = null) => {
+/**
+ * Open session of the sede; with `cajaId` it is that register's own session (each caja is independent).
+ * `permitidas` (ids de cajas del usuario, o null = todas) evita que un cajero venda en una caja que no es suya.
+ */
+const openCashSession = async (connection, sedeId, cajaId = null, permitidas = null) => {
+    if (permitidas !== null && (cajaId ? !permitidas.includes(Number(cajaId)) : permitidas.length === 0)) return null;
+    const filtro = cajaId ? 'AND caja_id = ?' : permitidas !== null ? 'AND caja_id IN (?)' : '';
     const [rows] = await connection.query(
-        `SELECT id FROM caja_sesiones WHERE sede_id = ? AND estado = 'abierta' ${cajaId ? 'AND caja_id = ?' : ''} ORDER BY fecha_apertura DESC LIMIT 1 FOR UPDATE`,
-        cajaId ? [sedeId, cajaId] : [sedeId]
+        `SELECT id FROM caja_sesiones WHERE sede_id = ? AND estado = 'abierta' ${filtro} ORDER BY fecha_apertura DESC LIMIT 1 FOR UPDATE`,
+        cajaId ? [sedeId, cajaId] : permitidas !== null ? [sedeId, permitidas] : [sedeId]
     );
     return rows[0]?.id || null;
 };
@@ -3545,7 +3884,9 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
             throw new FacturacionError(400, `Una boleta desde S/ ${BOLETA_LIMITE_ANONIMO} debe identificar al cliente (DNI)`);
         }
 
-        let sesionId = await openCashSession(connection, sedeId, cajaId);
+        const cajasPermitidas = await cajasDelUsuario(connection, req);
+        if (cajaId && cajasPermitidas !== null && !cajasPermitidas.includes(cajaId)) throw new FacturacionError(403, CAJA_AJENA);
+        let sesionId = await openCashSession(connection, sedeId, cajaId, cajasPermitidas);
         if (condicion === 'contado' && metodo === 'efectivo' && !sesionId) {
             throw new FacturacionError(409, cajaId
                 ? 'La caja seleccionada no esta abierta (Facturacion > Arqueo de Caja)'
@@ -3587,7 +3928,9 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
         }
         await connection.query('UPDATE correlativos SET siguiente_numero = siguiente_numero + 1 WHERE tipo = ? AND sede_id = ?', [tipo, sedeId]);
         await connection.query('UPDATE pedidos SET estado = ? WHERE id = ?', ['pagado', pedidoId]);
-        await descontarStockVenta(connection, sedeId, pedidoId, `Comprobante ${serie}-${String(numero).padStart(8, '0')}`, req.userContext.id);
+        // Stock leaves the warehouse of the register the sale is in (its caja), else the sede's sales warehouse.
+        const almacenVenta = (await almacenDeCaja(connection, cajaId)) || (await almacenDeSesion(connection, sesionId));
+        await descontarStockVenta(connection, sedeId, pedidoId, `Comprobante ${serie}-${String(numero).padStart(8, '0')}`, req.userContext.id, almacenVenta);
         await marcarDeliveryFacturado(connection, pedidoId, `${serie}-${String(numero).padStart(8, '0')}`, req.userContext.id);
         await connection.commit();
     } catch (err) {
@@ -4314,10 +4657,16 @@ const restituirStockVenta = async (connection, factura, usuarioId, { cantidades 
         pendientes = {};
         const ids = Object.keys(cantidades).map(Number).filter((id) => id > 0);
         const [factores] = ids.length
-            ? await connection.query(`SELECT id, ${tieneFactorVenta ? 'factor_venta' : '1 AS factor_venta'} FROM productos WHERE id IN (?)`, [ids])
+            ? await connection.query(
+                `SELECT p.id, ${productoStockSql()} AS stock_id, ${tieneFactorVenta ? 'p.factor_venta' : '1 AS factor_venta'} FROM productos p WHERE p.id IN (?)`,
+                [ids])
             : [[]];
-        const factorDe = new Map(factores.map((f) => [Number(f.id), Number(f.factor_venta) || 1]));
-        for (const id of ids) pendientes[id] = Math.round(Number(cantidades[id]) * (factorDe.get(id) || 1) * 1000) / 1000;
+        // A presentation gives back litres of its keg: the pending amounts are keyed by the stock product.
+        const datosDe = new Map(factores.map((f) => [Number(f.id), { stockId: Number(f.stock_id), factor: Number(f.factor_venta) || 1 }]));
+        for (const id of ids) {
+            const { stockId = id, factor = 1 } = datosDe.get(id) || {};
+            pendientes[stockId] = Math.round(((Number(pendientes[stockId]) || 0) + Number(cantidades[id]) * factor) * 1000) / 1000;
+        }
     }
     for (const salida of salidas) {
         let cantidad = Number(salida.cantidad);
@@ -5418,7 +5767,7 @@ const MANTENIMIENTO_SELECT_SQL = `
            m.plan_id, mp.nombre AS plan_nombre, mp.frecuencia_dias, m.tipo, m.estado, m.prioridad,
            DATE_FORMAT(m.fecha_programada, '%Y-%m-%d') AS fecha_programada,
            (m.estado = 'programado' AND m.fecha_programada < CURDATE()) AS vencido,
-           m.descripcion, m.reportado_por, ur.nombre AS reportado_por_nombre, m.diagnostico, m.trabajo_realizado, m.tecnico,
+           m.descripcion, m.reportado_por, ur.nombre AS reportado_por_nombre, (m.reportado_por IS NOT NULL) AS es_falla, m.diagnostico, m.trabajo_realizado, m.tecnico,
            m.proveedor_id, pr.razon_social AS proveedor_nombre, m.fecha_inicio,
            DATE_FORMAT(m.fecha_ejecucion, '%Y-%m-%d') AS fecha_ejecucion, m.costo_material, m.costo_servicio,
            ROUND(m.costo_material + m.costo_servicio, 2) AS costo_total, m.gasto_id,
@@ -5796,7 +6145,7 @@ app.get('/api/mantenimientos', allowAnyProfile, async (req, res) => {
     try {
         const [mantenimientos] = await pool.query(
             `${MANTENIMIENTO_SELECT_SQL} WHERE ${conditions.join(' AND ')}
-             ORDER BY ${vista === 'historial' ? 'COALESCE(m.fecha_ejecucion, m.fecha_programada) DESC' : "m.estado = 'en_ejecucion' DESC, m.fecha_programada ASC, FIELD(m.prioridad, 'alta', 'media', 'baja')"}, m.id`,
+             ORDER BY ${vista === 'historial' ? 'COALESCE(m.fecha_ejecucion, m.fecha_programada) DESC' : "(m.reportado_por IS NOT NULL AND m.estado = 'programado') DESC, m.estado = 'en_ejecucion' DESC, FIELD(m.prioridad, 'alta', 'media', 'baja'), m.fecha_programada ASC"}, m.id`,
             params
         );
         const resumen = mantenimientos.reduce((acc, m) => {
@@ -5805,11 +6154,28 @@ app.get('/api/mantenimientos', allowAnyProfile, async (req, res) => {
             if (m.estado === 'en_ejecucion') acc.en_ejecucion += 1;
             if (Number(m.vencido)) acc.vencidos += 1;
             if (m.tipo === 'correctivo' && MANTENIMIENTO_ACTIVOS.includes(m.estado)) acc.averias_abiertas += 1;
+            if (Number(m.es_falla) && MANTENIMIENTO_ACTIVOS.includes(m.estado)) acc.fallas_reportadas += 1;
             if (m.estado === 'ejecutado') { acc.ejecutados += 1; acc.costo_total += Number(m.costo_total); }
             return acc;
-        }, { cantidad: 0, programados: 0, en_ejecucion: 0, vencidos: 0, averias_abiertas: 0, ejecutados: 0, costo_total: 0 });
+        }, { cantidad: 0, programados: 0, en_ejecucion: 0, vencidos: 0, averias_abiertas: 0, fallas_reportadas: 0, ejecutados: 0, costo_total: 0 });
         resumen.costo_total = roundMoney(resumen.costo_total);
         res.json({ vista, periodo: startDate ? { desde: startDate, hasta: endDate } : null, sede_id: sedeFilter, resumen, mantenimientos });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Fallas reportadas aun abiertas (programadas o en ejecucion) de la sede: aviso en la campana del administrador.
+app.get('/api/mantenimientos/fallas-abiertas', allowAnyProfile, async (req, res) => {
+    if (req.userContext.base !== 'administrador') return res.json({ total: 0, fallas: [] });
+    const sedeId = sedeOf(req);
+    try {
+        const [fallas] = await pool.query(
+            `${MANTENIMIENTO_SELECT_SQL} WHERE m.reportado_por IS NOT NULL AND m.estado IN ('programado', 'en_ejecucion')${sedeId ? ' AND m.sede_id = ?' : ''}
+             ORDER BY FIELD(m.prioridad, 'alta', 'media', 'baja'), m.creado_en DESC LIMIT 50`,
+            sedeId ? [sedeId] : []
+        );
+        res.json({ total: fallas.length, fallas });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -6559,17 +6925,8 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
                     const costo = costoIngresado === null ? null : Math.round((costoIngresado / linea.factor) * 10000) / 10000;
                     if ((tipoItem === 'insumo' || tieneCostoProducto) && costo > 0) {
                         costoUnitario = costo;
-                        // Weighted average over the stock of the item in every warehouse, before this entry.
-                        const [total] = await connection.query(tipoItem === 'insumo'
-                            ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
-                            : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
-                        const previo = Math.max(0, Number(total[0].stock));
-                        const promedio = previo > 0 ? ((previo * Number(catalogo[0].costo_unitario || 0)) + (cantidad * costo)) / (previo + cantidad) : costo;
-                        // Supplies keep the cost with 2 decimals; products with 4 (a litre of beer costs a few cents per ml).
-                        await connection.query(
-                            `UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`,
-                            [tipoItem === 'insumo' ? round2(promedio) : Math.round(promedio * 10000) / 10000, itemId]
-                        );
+                        // Weighted average over the stock of the item in every warehouse, before this entry (4 decimals).
+                        await actualizarCostoPromedio(connection, tipoItem, itemId, cantidad, costo);
                     }
                 }
             }
@@ -7118,7 +7475,7 @@ app.post('/api/guias/remitente', allowAdmin, requireSede, async (req, res) => {
         } else {
             const [rows] = await connection.query(
                 `SELECT id, tipo_comprobante, serie, numero, numero_comprobante, cliente_tipo_doc, cliente_num_doc, cliente_nombre, cliente_direccion,
-                        estado_sunat, estado_comercial, sede_id
+                        estado_sunat, estado_comercial, sede_id, sesion_caja_id
                  FROM facturas WHERE id = ? AND sede_id = ? FOR UPDATE`,
                 [body.factura_id, sedeId]
             );
@@ -7134,7 +7491,7 @@ app.post('/api/guias/remitente', allowAdmin, requireSede, async (req, res) => {
                 codigo: codigoLinea(i), descripcion: i.descripcion, cantidad: Number(i.cantidad), unidad_medida: i.unidad_sunat || 'NIU'
             }));
             destinatario = { tipo: factura.cliente_tipo_doc === 'RUC' ? '6' : '1', numero: factura.cliente_num_doc, nombre: factura.cliente_nombre, direccion: llegada.direccion };
-            refs = { factura_id: factura.id, almacen_id: await almacenPorDefecto(connection, sedeId, 'ventas'), motivo: '01', texto: `${factura.tipo_comprobante === 'factura' ? 'Factura' : 'Boleta'} ${factura.numero_comprobante}`, factura };
+            refs = { factura_id: factura.id, almacen_id: (await almacenDeSesion(connection, factura.sesion_caja_id)) || await almacenPorDefecto(connection, sedeId, 'ventas'), motivo: '01', texto: `${factura.tipo_comprobante === 'factura' ? 'Factura' : 'Boleta'} ${factura.numero_comprobante}`, factura };
         }
 
         if (origen !== 'libre' && Array.isArray(body.items)) {
@@ -7503,6 +7860,45 @@ app.get('/api/reportes/ventas/excel', allowAdminOrCashier, requireSede, async (r
             ];
         });
         res.json({ periodo: { desde, hasta }, columnas: VENTAS_EXCEL_COLUMNAS, filas });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// R-03: consumo de cerveza de barril (u otro producto por litros) por producto base y presentacion, de los comprobantes no anulados.
+app.get('/api/reportes/consumo-litros', allowAdminOrCashier, requireSede, async (req, res) => {
+    const hoy = todayLocal();
+    const desde = typeof req.query.desde === 'string' && isRealDate(req.query.desde) ? req.query.desde : hoy;
+    const hasta = typeof req.query.hasta === 'string' && isRealDate(req.query.hasta) ? req.query.hasta : hoy;
+    if (desde > hasta) return res.status(400).json({ error: 'Rango de fechas invalido' });
+    if (!tieneProductoBase) return res.json({ periodo: { desde, hasta }, filas: [], totales: [] });
+    const importe = tieneDescuentos ? 'dp.subtotal * (1 - COALESCE(dp.descuento_pct, 0) / 100)' : 'dp.subtotal';
+    try {
+        const [filas] = await pool.query(
+            `SELECT b.id AS base_id, b.nombre AS base_nombre, COALESCE(um.abreviatura, 'L') AS unidad,
+                    p.id AS presentacion_id, p.nombre AS presentacion_nombre, p.factor_venta AS litros_por_unidad, p.precio,
+                    SUM(dp.cantidad) AS unidades, ROUND(SUM(dp.cantidad * p.factor_venta), 3) AS litros, ROUND(SUM(${importe}), 2) AS importe
+             FROM facturas f
+             JOIN detalles_pedido dp ON dp.pedido_id = f.pedido_id
+             JOIN productos p ON p.id = dp.producto_id AND p.producto_base_id IS NOT NULL
+             JOIN productos b ON b.id = p.producto_base_id
+             LEFT JOIN unidades_medida um ON um.id = b.unidad_id
+             WHERE f.sede_id = ? AND DATE(f.fecha_emision) BETWEEN ? AND ?
+               AND f.tipo_comprobante IN ('boleta', 'factura', 'nota_venta') AND f.estado_comercial <> 'anulado'
+             GROUP BY b.id, b.nombre, um.abreviatura, p.id, p.nombre, p.factor_venta, p.precio
+             ORDER BY b.nombre, p.factor_venta, p.nombre`,
+            [sedeOf(req), desde, hasta]
+        );
+        const totales = [];
+        for (const f of filas) {
+            Object.assign(f, { unidades: Number(f.unidades), litros: Number(f.litros), importe: Number(f.importe), litros_por_unidad: Number(f.litros_por_unidad) });
+            let t = totales.find((x) => x.base_id === f.base_id);
+            if (!t) totales.push(t = { base_id: f.base_id, base_nombre: f.base_nombre, unidad: f.unidad, unidades: 0, litros: 0, importe: 0 });
+            t.unidades += f.unidades;
+            t.litros = Math.round((t.litros + f.litros) * 1000) / 1000;
+            t.importe = round2(t.importe + f.importe);
+        }
+        res.json({ periodo: { desde, hasta }, filas, totales });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -7889,13 +8285,46 @@ const ORDEN_ESTADO_RECORDATORIO = { vencido: 0, por_vencer: 1, al_dia: 2, sin_fe
 const ordenarRecordatorios = (lista) => lista.sort((a, b) => (ORDEN_ESTADO_RECORDATORIO[a.estado] - ORDEN_ESTADO_RECORDATORIO[b.estado])
     || String(a.proxima_fecha || '9999').localeCompare(String(b.proxima_fecha || '9999')) || a.nombre.localeCompare(b.nombre, 'es'));
 
+// T-01: tabla recordatorio_pagos (se crea al iniciar). Un recordatorio con monto genera su pago en Gastos al atenderse.
+let tieneRecordatorioPagos = false;
+
+/** Period a reminder is attended for: the month (AAAA-MM) of a monthly reminder, the due date of a fixed-date one. */
+const periodoRecordatorio = (r, hoy) => (r.tipo_vencimiento === 'periodico' ? hoy.slice(0, 7) : String(r.fecha_vencimiento || '').slice(0, 10));
+
+/** Adds to each reminder the expense generated for its current period (pago_periodo) and how many it has generated. */
+const adjuntarPagosRecordatorio = async (connection, lista, hoy) => {
+    if (!tieneRecordatorioPagos || lista.length === 0) return lista;
+    const [links] = await connection.query(
+        `SELECT rp.recordatorio_id, rp.periodo, rp.gasto_id, CONCAT('G-', LPAD(g.id, 6, '0')) AS gasto_codigo, g.estado AS gasto_estado,
+                g.importe, DATE_FORMAT(g.fecha, '%Y-%m-%d') AS gasto_fecha
+         FROM recordatorio_pagos rp JOIN gastos g ON g.id = rp.gasto_id
+         WHERE rp.recordatorio_id IN (?) ORDER BY rp.id DESC`,
+        [lista.map((r) => r.id)]
+    );
+    for (const r of lista) {
+        const propios = links.filter((l) => Number(l.recordatorio_id) === Number(r.id));
+        const periodo = periodoRecordatorio(r, hoy);
+        r.periodo_actual = periodo;
+        r.pago_periodo = propios.find((l) => l.periodo === periodo && l.gasto_estado !== 'anulado') || null;
+        r.pagos_generados = propios.filter((l) => l.gasto_estado !== 'anulado').length;
+    }
+    return lista;
+};
+
 const cargarRecordatorios = async (connection, sedeFilter, extraWhere = '') => {
     const [rows] = await connection.query(
         `${RECORDATORIO_SELECT_SQL} WHERE r.eliminado = 0 ${sedeFilter ? 'AND r.sede_id = ?' : ''} ${extraWhere}`,
         sedeFilter ? [sedeFilter] : []
     );
     const hoy = todayLocal();
-    return ordenarRecordatorios(rows.map((r) => calcularRecordatorio(r, hoy)));
+    return ordenarRecordatorios(await adjuntarPagosRecordatorio(connection, rows.map((r) => calcularRecordatorio(r, hoy)), hoy));
+};
+
+/** One reminder with its state and generated payment, as the list returns it. */
+const recordatorioRespuesta = async (connection, req, id) => {
+    const hoy = todayLocal();
+    const [r] = await adjuntarPagosRecordatorio(connection, [calcularRecordatorio(await findRecordatorio(connection, req, id), hoy)], hoy);
+    return r;
 };
 
 const findRecordatorio = async (connection, req, id) => {
@@ -8007,13 +8436,109 @@ const accionRecordatorio = (ruta, sql, validar) => app.post(`/api/recordatorios/
         const params = validar ? validar(req, actual) : [];
         if (params.error) return res.status(params.status || 400).json({ error: params.error });
         await pool.query(sql, [...params, actual.id]);
-        res.json(calcularRecordatorio(await findRecordatorio(pool, req, actual.id), todayLocal()));
+        res.json(await recordatorioRespuesta(pool, req, actual.id));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
-accionRecordatorio('atender', 'UPDATE recordatorios SET fecha_ultimo_pago = CURDATE() WHERE id = ?');
-accionRecordatorio('revertir', 'UPDATE recordatorios SET fecha_ultimo_pago = NULL WHERE id = ?');
+/**
+ * Atender: marca el periodo como pagado/atendido. Si el recordatorio es un pago con monto y se pide `generar_pago`,
+ * en la misma transaccion registra el gasto al contado (con su pago) en Pagos y Gastos y lo vincula al periodo:
+ * un pago por periodo (cada mes en los periodicos). Body: { generar_pago, fecha_pago, metodo_pago, referencia,
+ * categoria_gasto_id, tipo_documento, serie, numero }.
+ */
+app.post('/api/recordatorios/:id/atender', allowRecordatorios, async (req, res) => {
+    const body = req.body || {};
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const actual = await findRecordatorio(connection, req, req.params.id);
+        if (!actual) throw new GastoError(404, 'Recordatorio no encontrado');
+        await connection.query('SELECT id FROM recordatorios WHERE id = ? FOR UPDATE', [actual.id]);
+        const hoy = todayLocal();
+        const calculado = calcularRecordatorio(actual, hoy);
+        if (calculado.atendido) throw new GastoError(409, 'El recordatorio ya esta atendido en este periodo');
+
+        const conMonto = actual.categoria === 'pago' && Number(actual.monto) > 0;
+        if (body.generar_pago && conMonto) {
+            if (!tieneRecordatorioPagos) throw new GastoError(503, 'La base de datos aun no tiene la tabla de pagos de recordatorios: reinicie la aplicacion');
+            const periodo = periodoRecordatorio(actual, hoy);
+            const [previo] = await connection.query(
+                `SELECT rp.id, rp.gasto_id, g.estado FROM recordatorio_pagos rp JOIN gastos g ON g.id = rp.gasto_id
+                 WHERE rp.recordatorio_id = ? AND rp.periodo = ? FOR UPDATE`,
+                [actual.id, periodo]
+            );
+            if (previo[0] && previo[0].estado !== 'anulado') {
+                throw new GastoError(409, `El periodo ${periodo} ya tiene su pago registrado (G-${String(previo[0].gasto_id).padStart(6, '0')})`);
+            }
+            if (previo[0]) await connection.query('DELETE FROM recordatorio_pagos WHERE id = ?', [previo[0].id]);
+
+            let categoriaId = Number(body.categoria_gasto_id) || null;
+            if (!categoriaId) {
+                const [cat] = await connection.query("SELECT id FROM categorias_gasto WHERE activo = 1 ORDER BY nombre = 'Otros gastos' DESC, id ASC LIMIT 1");
+                categoriaId = cat[0]?.id || null;
+            }
+            const tipoDocumento = GASTO_TIPOS_DOCUMENTO.includes(body.tipo_documento) ? body.tipo_documento : 'sin_comprobante';
+            const etiquetaPeriodo = actual.tipo_vencimiento === 'periodico' ? `periodo ${periodo}` : `vencimiento ${periodo}`;
+            const gastoId = await insertarGasto(connection, req, actual.sede_id, {
+                categoria_id: categoriaId,
+                beneficiario: actual.nombre.length >= 3 ? actual.nombre : `Recordatorio ${actual.nombre}`,
+                fecha: String(body.fecha_pago || hoy).slice(0, 10),
+                tipo_documento: tipoDocumento,
+                serie: body.serie,
+                numero: body.numero,
+                descripcion: `Recordatorio: ${actual.nombre} (${etiquetaPeriodo})`,
+                importe: Number(actual.monto),
+                condicion_pago: 'contado',
+                observacion: body.observacion || null,
+                pago: { metodo_pago: body.metodo_pago, referencia: body.referencia, observacion: `Generado desde el recordatorio #${actual.id}` }
+            });
+            await connection.query(
+                'INSERT INTO recordatorio_pagos (recordatorio_id, sede_id, periodo, gasto_id, usuario_id) VALUES (?, ?, ?, ?, ?)',
+                [actual.id, actual.sede_id, periodo, gastoId, req.userContext.id]
+            );
+        }
+        await connection.query('UPDATE recordatorios SET fecha_ultimo_pago = CURDATE() WHERE id = ?', [actual.id]);
+        await connection.commit();
+        res.json(await recordatorioRespuesta(pool, req, actual.id));
+    } catch (err) {
+        await connection.rollback();
+        sendGastoError(res, err);
+    } finally {
+        connection.release();
+    }
+});
+
+// Revertir: vuelve el periodo a pendiente. Si genero un gasto vigente, primero hay que anularlo en Pagos y Gastos.
+app.post('/api/recordatorios/:id/revertir', allowRecordatorios, async (req, res) => {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const actual = await findRecordatorio(connection, req, req.params.id);
+        if (!actual) throw new GastoError(404, 'Recordatorio no encontrado');
+        if (tieneRecordatorioPagos) {
+            const periodo = periodoRecordatorio(actual, todayLocal());
+            const [links] = await connection.query(
+                `SELECT rp.id, rp.gasto_id, g.estado FROM recordatorio_pagos rp JOIN gastos g ON g.id = rp.gasto_id
+                 WHERE rp.recordatorio_id = ? AND rp.periodo = ? FOR UPDATE`,
+                [actual.id, periodo]
+            );
+            const vigente = links.find((l) => l.estado !== 'anulado');
+            if (vigente) {
+                throw new GastoError(409, `Este periodo tiene el gasto G-${String(vigente.gasto_id).padStart(6, '0')} registrado: anule su pago y el gasto en Pagos y Gastos antes de revertir`);
+            }
+            if (links.length > 0) await connection.query('DELETE FROM recordatorio_pagos WHERE id IN (?)', [links.map((l) => l.id)]);
+        }
+        await connection.query('UPDATE recordatorios SET fecha_ultimo_pago = NULL WHERE id = ?', [actual.id]);
+        await connection.commit();
+        res.json(await recordatorioRespuesta(pool, req, actual.id));
+    } catch (err) {
+        await connection.rollback();
+        sendGastoError(res, err);
+    } finally {
+        connection.release();
+    }
+});
 accionRecordatorio('alternar', 'UPDATE recordatorios SET activo = NOT activo WHERE id = ?');
 accionRecordatorio('fecha', 'UPDATE recordatorios SET fecha_vencimiento = ?, fecha_ultimo_pago = NULL WHERE id = ?', (req, actual) => {
     const fecha = String(req.body?.fecha_vencimiento || '').slice(0, 10);
@@ -8021,6 +8546,9 @@ accionRecordatorio('fecha', 'UPDATE recordatorios SET fecha_vencimiento = ?, fec
     if (!isRealDate(fecha)) return { error: 'Ingrese una fecha valida' };
     return [fecha];
 });
+
+// R-01: modulo Personal (trabajadores, uniforme y EPP, control diario C/NC, costos y catalogos), en server/personal.js.
+personal.registrar(app, { allowAdmin });
 
 app.delete('/api/recordatorios/:id', allowRecordatorios, async (req, res) => {
     try {
@@ -8130,13 +8658,114 @@ const asegurarDescuentos = async () => {
     tieneDescuentos = true;
 };
 
+// clientes.activo: un cliente con pedidos o comprobantes no se elimina, se desactiva. Idempotente.
+const asegurarClientesActivo = async () => {
+    const [rows] = await pool.query(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'clientes' AND COLUMN_NAME = 'activo'"
+    );
+    if (rows.length === 0) {
+        await pool.query('ALTER TABLE clientes ADD COLUMN activo TINYINT(1) NOT NULL DEFAULT 1');
+        console.log('clientes.activo agregado');
+    }
+    tieneClienteActivo = true;
+};
+
+/**
+ * Version 2 (propuesta COT-2026-0010): presentaciones por litros (R-03), cajas con almacen (R-02) y pagos de recordatorios (T-01).
+ * Idempotente: crea solo lo que falta. Mientras no exista, cada funcion sigue trabajando como antes.
+ */
+const asegurarVersion2 = async () => {
+    const columna = async (tabla, col) => {
+        const [rows] = await pool.query(
+            'SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?', [tabla, col]);
+        return rows.length > 0;
+    };
+    const fk = async (tabla, col) => {
+        const [rows] = await pool.query(
+            `SELECT 1 FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL`, [tabla, col]);
+        return rows.length > 0;
+    };
+
+    if (!(await columna('productos', 'producto_base_id'))) {
+        await pool.query('ALTER TABLE productos ADD COLUMN producto_base_id INT NULL');
+        console.log('productos.producto_base_id agregado');
+    }
+    if (!(await fk('productos', 'producto_base_id'))) {
+        await pool.query('ALTER TABLE productos ADD CONSTRAINT fk_productos_base FOREIGN KEY (producto_base_id) REFERENCES productos(id)');
+    }
+    tieneProductoBase = true;
+
+    if (!(await columna('cajas', 'almacen_id'))) {
+        await pool.query('ALTER TABLE cajas ADD COLUMN almacen_id INT NULL');
+        console.log('cajas.almacen_id agregado');
+    }
+    if (!(await fk('cajas', 'almacen_id'))) {
+        await pool.query('ALTER TABLE cajas ADD CONSTRAINT fk_cajas_almacen FOREIGN KEY (almacen_id) REFERENCES almacenes(id)');
+    }
+    if (!(await columna('cajas', 'activo'))) {
+        await pool.query('ALTER TABLE cajas ADD COLUMN activo TINYINT(1) NOT NULL DEFAULT 1');
+        console.log('cajas.activo agregado');
+    }
+    tieneCajaAlmacen = true;
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS recordatorio_pagos (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            recordatorio_id INT NOT NULL,
+            sede_id INT NOT NULL,
+            periodo VARCHAR(10) NOT NULL,
+            gasto_id INT NOT NULL,
+            usuario_id INT NULL,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_recordatorio_periodo (recordatorio_id, periodo),
+            KEY idx_recordatorio_pagos_gasto (gasto_id),
+            CONSTRAINT fk_recpagos_recordatorio FOREIGN KEY (recordatorio_id) REFERENCES recordatorios(id),
+            CONSTRAINT fk_recpagos_gasto FOREIGN KEY (gasto_id) REFERENCES gastos(id),
+            CONSTRAINT fk_recpagos_sede FOREIGN KEY (sede_id) REFERENCES sedes(id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    tieneRecordatorioPagos = true;
+};
+
+/**
+ * Observaciones del cliente (nov. 2026). Idempotente: crea o cambia solo lo que falta.
+ *   - insumos.costo_unitario con 4 decimales (costo promedio por gramo / mililitro).
+ *   - caja_usuarios: usuarios asignados a cada caja (varios, por turno).
+ */
+const asegurarObservacionesNov2026 = async () => {
+    const [costo] = await pool.query(
+        "SELECT NUMERIC_SCALE AS escala, NUMERIC_PRECISION AS precision_total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'insumos' AND COLUMN_NAME = 'costo_unitario'"
+    );
+    if (costo[0] && (Number(costo[0].escala) < 4 || Number(costo[0].precision_total) < 12)) {
+        await pool.query('ALTER TABLE insumos MODIFY costo_unitario DECIMAL(12,4) DEFAULT 0');
+        console.log('insumos.costo_unitario ahora con 4 decimales');
+    }
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS caja_usuarios (
+            caja_id INT NOT NULL,
+            usuario_id INT NOT NULL,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (caja_id, usuario_id),
+            KEY idx_caja_usuarios_usuario (usuario_id),
+            CONSTRAINT fk_cajausr_caja FOREIGN KEY (caja_id) REFERENCES cajas(id) ON DELETE CASCADE,
+            CONSTRAINT fk_cajausr_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    tieneCajaUsuarios = true;
+};
+
 const iniciar = () => app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     permisos.iniciar();
     asegurarDescuentos().catch((err) => console.error('No se pudieron preparar las columnas de descuento:', err.message));
     asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
+    asegurarClientesActivo().catch((err) => console.error('No se pudo preparar clientes.activo:', err.message));
+    asegurarVersion2().catch((err) => console.error('No se pudieron preparar las tablas de la version 2:', err.message));
+    asegurarObservacionesNov2026().catch((err) => console.error('No se pudieron preparar las cajas por usuario / costos:', err.message));
+    personal.asegurarEsquema().catch((err) => console.error('No se pudieron preparar las tablas de Personal:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();
     setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref(); });
 if (require.main === module) iniciar();
-module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, cargarUnidadesSunat };
+module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, asegurarClientesActivo, asegurarVersion2, asegurarObservacionesNov2026, cargarUnidadesSunat, personal };

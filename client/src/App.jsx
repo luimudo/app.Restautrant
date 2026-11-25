@@ -89,7 +89,7 @@ function App() {
               <Route path="billing" element={withAccess(MODULES.billing, <Billing />)} />
               <Route path="cuentas-por-cobrar" element={withAccess(MODULES.receivables, <CuentasPorCobrar />)} />
               <Route path="settings" element={withAccess(MODULES.settings, <Settings />)} />
-              <Route path="permisos" element={withAccess(MODULES.settings, <Permisos />)} />
+              <Route path="permisos" element={withAccess(MODULES.permisos, <Permisos />)} />
               <Route path="sedes" element={withAccess(MODULES.sedes, <Sedes />)} />
               <Route path="help" element={withAccess(MODULES.help, <Placeholder title="Ayuda" />)} />
               <Route path="*" element={<Navigate to="/" replace />} />

@@ -200,10 +200,13 @@ const Inventory = () => {
                         <ArrowUpRight size={28} />
                     </div>
                     <div>
-                        <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 leading-none mb-1">Inversión Aprox.</p>
+                        <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 leading-none mb-1">Valor en stock (costo promedio)</p>
                         <p className="text-2xl font-display font-black text-emerald-600">
-                            S/ {filteredData.reduce((acc, curr) => acc + ((curr.costo_unitario || curr.precio * 0.4) * (curr.stock_actual || curr.stock || 0)), 0).toLocaleString()}
+                            S/ {filteredData.reduce((acc, curr) => acc + (Number(curr.costo_unitario || 0) * Math.max(0, Number(curr.stock_actual ?? curr.stock ?? 0))), 0).toLocaleString('es-PE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </p>
+                        {filteredData.some((i) => !(Number(i.costo_unitario) > 0)) && (
+                            <p className="text-[10px] text-gray-400 mt-1">{filteredData.filter((i) => !(Number(i.costo_unitario) > 0)).length} ítem(s) sin costo registrado no suman</p>
+                        )}
                     </div>
                 </div>
             </div>
@@ -276,7 +279,7 @@ const Inventory = () => {
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100">Categoría</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-center">Unidad</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-center">Stock Actual</th>
-                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Costo / Precio</th>
+                                <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Costo promedio</th>
                                 <th className="px-8 py-5 text-[10px] font-black uppercase tracking-widest text-gray-400 border-b border-gray-100 text-right">Acciones</th>
                             </tr>
                         </thead>
@@ -315,7 +318,10 @@ const Inventory = () => {
                                             </span>
                                         </td>
                                         <td className="px-8 py-6 border-b border-gray-50 text-right">
-                                            <span className="font-black text-gray-900">S/ {(Number(item.costo_unitario) || Number(item.precio)).toFixed(2)}</span>
+                                            {/* Costo promedio ponderado; nunca el precio de venta. Hasta 4 decimales para costos por gramo o mililitro. */}
+                                            {Number(item.costo_unitario) > 0
+                                                ? <span className="font-black text-gray-900">S/ {Number(item.costo_unitario).toLocaleString('es-PE', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</span>
+                                                : <span className="text-xs font-bold text-gray-400">Sin costo</span>}
                                         </td>
                                         <td className="px-8 py-6 border-b border-gray-50 text-right">
                                             {tab === 'insumos' ? (
@@ -444,7 +450,7 @@ const Inventory = () => {
                                         <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] ml-1">Costo Unitario (S/)</label>
                                         <input
                                             type="number"
-                                            step="0.01"
+                                            step="0.0001"
                                             className="input"
                                             value={currentItem.costo_unitario}
                                             onChange={(e) => setCurrentItem({ ...currentItem, costo_unitario: e.target.value })}

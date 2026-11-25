@@ -261,7 +261,7 @@ CREATE TABLE insumos (
     id INT AUTO_INCREMENT PRIMARY KEY,
     nombre VARCHAR(150) NOT NULL,
     unidad_medida VARCHAR(30) NOT NULL,
-    costo_unitario DECIMAL(10,2) DEFAULT 0.00,
+    costo_unitario DECIMAL(12,4) DEFAULT 0,  -- costo promedio ponderado por unidad de stock (4 decimales: por gramo / ml)
     categoria_id INT NULL,
     unidad_id INT NULL,
     CONSTRAINT fk_insumos_categoria FOREIGN KEY (categoria_id) REFERENCES categorias_insumo(id),

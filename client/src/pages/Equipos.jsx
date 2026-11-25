@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
     Wrench, Plus, Search, AlertTriangle, Eye, Edit2, Play, CheckCircle2, XCircle, CalendarClock, Trash2, History, ShieldCheck, Download
 } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { SUPERADMIN } from '../security/accessControl';
 import { addDaysYmd, formatDateTime, startOfMonthYmd, toPeruYmd } from '../utils/dateTime';
@@ -46,7 +47,8 @@ const Equipos = () => {
     const today = toPeruYmd();
     const defaultSede = activeSedeId ? String(activeSedeId) : 'todas';
 
-    const [tab, setTab] = useState('inventario');
+    // ?tab=pendientes abre directo los mantenimientos pendientes (aviso de fallas de la campana).
+    const [tab, setTab] = useState(() => (new URLSearchParams(window.location.search).get('tab') === 'pendientes' ? 'pendientes' : 'inventario'));
     const [message, setMessage] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
@@ -118,6 +120,14 @@ const Equipos = () => {
         // Only on tab change; filters are applied with the Buscar button.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tab]);
+
+    // Desde la campana (ya dentro de Equipos): ?tab=pendientes cambia a esa pestaña y la recarga.
+    const location = useLocation();
+    useEffect(() => {
+        if (new URLSearchParams(location.search).get('tab') !== 'pendientes') return;
+        if (tab === 'pendientes') refresh('pendientes'); else setTab('pendientes');
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.search, location.key]);
 
     useEffect(() => {
         fetch('/api/equipos/opciones').then((res) => (res.ok ? res.json() : {})).then((body) => setProveedores(body.proveedores || [])).catch(() => {});
@@ -335,6 +345,7 @@ const Equipos = () => {
                             <Tile label="Vencidos" value={pendientes.resumen.vencidos} tone="text-rose-600" />
                             <Tile label="En ejecucion" value={pendientes.resumen.en_ejecucion} tone="text-sky-600" />
                             <Tile label="Averias abiertas" value={pendientes.resumen.averias_abiertas} tone="text-rose-600" />
+                            <Tile label="Fallas reportadas" value={pendientes.resumen.fallas_reportadas ?? 0} tone="text-rose-600" />
                         </div>
                     )}
                     <MantenimientosTable rows={pendientes.mantenimientos} loading={loading} actions={mantenimientoActions} showSede={isSuperadmin && pendSede === 'todas'} pendientes />
@@ -378,7 +389,7 @@ const Equipos = () => {
 
             {fallaTarget && (
                 <FallaModal equipo={fallaTarget} onClose={() => setFallaTarget(null)}
-                    onSaved={(m) => { setFallaTarget(null); afterChange(`Falla reportada (${m.codigo}). El administrador la vera en mantenimientos pendientes.`, m.equipo_id); }} />
+                    onSaved={(m) => { setFallaTarget(null); afterChange(`Falla reportada (${m.codigo}). Se avisó al administrador (campana de notificaciones) y figura primero en «Mantenimientos pendientes».`, m.equipo_id); }} />
             )}
 
             {planForm && (
@@ -430,9 +441,10 @@ const MantenimientosTable = ({ rows, loading, actions, showSede, pendientes = fa
                             </td>
                             <td className="px-5 py-4"><p className="font-semibold">{m.equipo_nombre}</p><p className="text-xs text-gray-500 font-mono">{m.equipo_codigo} · {AREAS[m.equipo_area]}</p></td>
                             <td className="px-5 py-4 text-sm max-w-[320px]">
+                                {Number(m.es_falla) === 1 && <p className="inline-flex items-center gap-1 mb-1 px-2 py-0.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-black uppercase tracking-widest"><AlertTriangle size={12} /> Falla reportada</p>}
                                 <p className="font-bold capitalize">{m.tipo}{m.tipo === 'correctivo' && <span className={`ml-2 text-[10px] uppercase ${PRIORIDAD[m.prioridad]}`}>Prioridad {m.prioridad}</span>}</p>
                                 <p className="text-gray-600 line-clamp-2" title={m.descripcion}>{m.trabajo_realizado || m.descripcion}</p>
-                                {m.reportado_por_nombre && <p className="text-[11px] text-gray-400">Reportado por {m.reportado_por_nombre}</p>}
+                                {m.reportado_por_nombre && <p className="text-[11px] text-gray-500 font-semibold">Reportado por {m.reportado_por_nombre}{m.creado_en ? ` · ${formatDateTime(m.creado_en)}` : ''}</p>}
                                 {m.estado === 'anulado' && m.motivo_anulacion && <p className="text-[11px] text-gray-400">Anulado: {m.motivo_anulacion}</p>}
                             </td>
                             {showSede && <td className="px-5 py-4 text-sm">{m.sede_nombre}</td>}

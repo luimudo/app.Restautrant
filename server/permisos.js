@@ -33,6 +33,8 @@ const MODULOS = [
     { clave: 'receivables', nombre: 'Cuentas por cobrar' },
     { clave: 'sedes', nombre: 'Sedes' },
     { clave: 'settings', nombre: 'Configuración y usuarios' },
+    // Pantalla de perfiles y permisos: por defecto solo el super admin; el super admin puede otorgarla a un perfil.
+    { clave: 'permisos', nombre: 'Perfiles y permisos' },
     { clave: 'help', nombre: 'Ayuda' },
     // No es una pantalla: habilita aplicar descuentos % (por plato y global) en el punto de venta.
     { clave: 'descuentos', nombre: 'Aplicar descuentos en el punto de venta' }
@@ -50,7 +52,7 @@ const SEMILLA = [
     {
         codigo: 'administrador', nombre: 'Administrador', base: 'administrador', alcance: 'sede', sistema: 1,
         descripcion: 'Acceso a todo el sistema de su sede.',
-        modulos: MODULO_CLAVES.filter((m) => m !== 'sedes')
+        modulos: MODULO_CLAVES.filter((m) => m !== 'sedes' && m !== 'permisos')
     },
     {
         codigo: 'mozo', nombre: 'Mozo', base: 'mozo', alcance: 'sede', sistema: 1,
@@ -87,7 +89,7 @@ const SEMILLA = [
 // Modulos que cada perfil base ya tenia antes de existir los permisos editables: dentro de ellos rigen las reglas de cada ruta
 // (p. ej. solo el administrador emite notas de credito); un modulo agregado fuera de esta lista da acceso completo a sus rutas.
 const BASE_NATIVOS = {
-    administrador: new Set(MODULO_CLAVES.filter((m) => m !== 'sedes')),
+    administrador: new Set(MODULO_CLAVES.filter((m) => m !== 'sedes' && m !== 'permisos')),
     mozo: new Set(['dashboard', 'pos', 'delivery', 'reservations', 'equipment', 'clients', 'help']),
     caja: new Set(['dashboard', 'delivery', 'billing', 'receivables', 'expenses', 'equipment', 'reservations', 'clients', 'help']),
     cocina: new Set(['dashboard', 'kitchen', 'bar', 'equipment', 'warehouses', 'help'])
@@ -116,7 +118,9 @@ const RUTAS_MODULO = [
     [/^\/proveedores(\/|$)/, null, ['suppliers', 'purchases', 'expenses', 'inventory'], ['suppliers', 'purchases']],
     [/^\/sedes(\/|$)/, 'ESCRITURA', ['sedes']],
     // Usuarios y permisos exigen el perfil base administrador: ningun modulo los abre a otro perfil base.
-    [/^\/(usuarios|permisos)(\/|$)/, null, ['settings'], []],
+    [/^\/usuarios(\/|$)/, null, ['settings'], []],
+    // Perfiles y permisos: solo con el modulo "permisos" (por defecto, solo el super admin).
+    [/^\/permisos(\/|$)/, null, ['permisos'], []],
     [/^\/configuracion(\/|$)/, null, ['settings', 'billing'], ['settings']]
 ];
 

@@ -13,6 +13,8 @@ const round2 = (value) => Math.round(value * 100) / 100;
 const header = (label) => ({ value: label, ...HEADER });
 const cellText = (value) => ({ type: String, value: text(value) });
 const cellNum = (value) => ({ type: Number, value: num(value), format: MONEDA });
+// Costo unitario promedio: hasta 4 decimales (un insumo por gramo cuesta fracciones de centimo).
+const cellCosto = (value) => ({ type: Number, value: num(value), format: '#,##0.00##' });
 const cellInt = (value) => ({ type: Number, value: num(value) });
 
 const sheet = (name, columns, rows) => ({
@@ -41,7 +43,7 @@ const INSUMO_COLUMNS = [
     { label: 'Categoría', width: 20, cell: (r) => cellText(r.categoria || 'Sin categoría') },
     { label: 'Unidad', width: 14, cell: (r) => cellText(r.unidad) },
     { label: 'Stock actual', width: 14, cell: (r) => cellNum(r.stock) },
-    { label: 'Costo unitario', width: 16, cell: (r) => cellNum(r.costo) },
+    { label: 'Costo unitario', width: 16, cell: (r) => cellCosto(r.costo) },
     { label: 'Valor en stock', width: 16, cell: (r) => cellNum(r.valor) }
 ];
 
@@ -51,7 +53,7 @@ const BARRA_COLUMNS = [
     { label: 'Unidad', width: 14, cell: (r) => cellText(r.unidad) },
     { label: 'Stock actual', width: 14, cell: (r) => cellNum(r.stock) },
     { label: 'Precio de venta', width: 16, cell: (r) => cellNum(r.precio) },
-    { label: 'Costo unitario', width: 16, cell: (r) => cellNum(r.costo) },
+    { label: 'Costo unitario', width: 16, cell: (r) => cellCosto(r.costo) },
     { label: 'Origen del costo', width: 16, cell: (r) => cellText(r.origen) },
     { label: 'Valor en stock', width: 16, cell: (r) => cellNum(r.valor) }
 ];

@@ -677,7 +677,7 @@ const Billing = () => {
                                     <div className="space-y-4">
                                         <h4 className="text-lg font-black text-gray-900">Apertura de Caja</h4>
                                         {cajas.length === 0 ? (
-                                            <p className="text-sm text-gray-500">No hay cajas activas en la sede. {esAdministrador ? 'Créalas con el botón «Cajas».' : 'Pide al administrador que cree una.'}</p>
+                                            <p className="text-sm text-gray-500">{esAdministrador ? 'No hay cajas activas en la sede. Créalas con el botón «Cajas».' : 'No tienes cajas asignadas. Pide al administrador que te asigne una caja en «Cajas».'}</p>
                                         ) : (
                                             <form onSubmit={handleOpenCashSession} className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                                 <div>

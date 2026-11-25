@@ -30,7 +30,7 @@ const MAIN_ITEMS = [
 const SYSTEM_ITEMS = [
     { to: '/sedes', icon: <Building2 size={20} />, label: 'Sedes', moduleKey: MODULES.sedes },
     { to: '/settings', icon: <Settings size={20} />, label: 'Configuracion', moduleKey: MODULES.settings },
-    { to: '/permisos', icon: <ShieldCheck size={20} />, label: 'Perfiles y permisos', moduleKey: MODULES.settings },
+    { to: '/permisos', icon: <ShieldCheck size={20} />, label: 'Perfiles y permisos', moduleKey: MODULES.permisos },
     { to: '/help', icon: <HelpCircle size={20} />, label: 'Ayuda', moduleKey: MODULES.help }
 ];
 
@@ -222,8 +222,8 @@ const MainLayout = () => {
                     <div className="flex items-center gap-2 sm:gap-4 lg:gap-6 shrink-0">
                         <div className="hidden sm:flex">{sedeSelector()}</div>
 
-                        {canAccess(MODULES.reminders) ? (
-                            <RecordatoriosBell />
+                        {canAccess(MODULES.reminders) || canAccess(MODULES.equipment) ? (
+                            <RecordatoriosBell recordatorios={canAccess(MODULES.reminders)} fallas={canAccess(MODULES.equipment)} />
                         ) : (
                             <button className="hidden sm:inline-flex p-2.5 rounded-2xl text-gray-500 hover:bg-gray-100 transition-all relative group" aria-label="Notificaciones">
                                 <Bell size={20} className="group-hover:rotate-12 transition-transform" />

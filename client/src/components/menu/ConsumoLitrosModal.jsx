@@ -43,9 +43,8 @@ const ConsumoLitrosModal = ({ sedeNombre, onClose }) => {
         ]);
         const sede = String(sedeNombre || 'Sede').normalize('NFD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
         await writeXlsxFile([cols.map((value) => ({ value, ...HEADER })), ...filas, [null], ...totales], {
-            columns: [{ width: 32 }, { width: 28 }, { width: 16 }, { width: 18 }, { width: 12 }, { width: 14 }],
-            fileName: `Consumo_litros_${sede}_${data.periodo.desde}_${data.periodo.hasta}.xlsx`
-        });
+            columns: [{ width: 32 }, { width: 28 }, { width: 16 }, { width: 18 }, { width: 12 }, { width: 14 }]
+        }).toFile(`Consumo_litros_${sede}_${data.periodo.desde}_${data.periodo.hasta}.xlsx`);
     };
 
     return (

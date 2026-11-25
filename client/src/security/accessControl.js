@@ -41,6 +41,7 @@ export const MODULES = {
     receivables: 'receivables',
     reminders: 'reminders',
     settings: 'settings',
+    permisos: 'permisos',
     sedes: 'sedes',
     help: 'help'
 };
@@ -75,6 +76,7 @@ const moduleRoute = {
     [MODULES.receivables]: '/cuentas-por-cobrar',
     [MODULES.reminders]: '/recordatorios',
     [MODULES.settings]: '/settings',
+    [MODULES.permisos]: '/permisos',
     [MODULES.sedes]: '/sedes',
     [MODULES.help]: '/help'
 };

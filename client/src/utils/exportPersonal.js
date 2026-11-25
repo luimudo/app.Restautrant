@@ -7,7 +7,6 @@ const HEADER = { fontWeight: 'bold', backgroundColor: '#F3F4F6' };
 
 export const VINCULO_LABEL = { planilla: 'Planilla', honorarios: 'Honorarios', locacion: 'Locación de servicios', practicante: 'Practicante' };
 export const ESTADO_LABEL = { activo: 'Activo', vacaciones: 'Vacaciones', suspendido: 'Suspendido', cesado: 'Cesado' };
-export const FUNCION_LABEL = { mozo: 'Mozo', cocina: 'Cocina', bar: 'Bar', caja: 'Caja', delivery: 'Delivery', limpieza: 'Limpieza', administracion: 'Administración' };
 export const ESTADO_ELEMENTO_LABEL = { nuevo: 'Nuevo', bueno: 'Bueno', regular: 'Regular', danado: 'Dañado' };
 
 const t = (v) => ({ type: String, value: v === null || v === undefined || v === '' ? null : String(v) });
@@ -17,11 +16,11 @@ const f = (ymd) => ({ type: Date, value: ymd ? new Date(`${String(ymd).slice(0, 
 
 const descargar = async (prefijo, sedeNombre, columnas, filas, sufijo = '') => {
     const sede = String(sedeNombre || 'Sede').normalize('NFD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
+    // write-excel-file 4.x: el archivo se descarga con .toFile() (la opcion fileName ya no existe).
     await writeXlsxFile([columnas.map((c) => ({ value: c.label, ...HEADER })), ...filas.map((row) => columnas.map((c) => c.cell(row)))], {
         columns: columnas.map((c) => ({ width: c.width })),
-        stickyRowsCount: 1,
-        fileName: `${prefijo}_${sede}${sufijo ? `_${sufijo}` : ''}_${toPeruYmd()}.xlsx`
-    });
+        stickyRowsCount: 1
+    }).toFile(`${prefijo}_${sede}${sufijo ? `_${sufijo}` : ''}_${toPeruYmd()}.xlsx`);
 };
 
 export const exportarTrabajadores = (sede, filas, conRemuneracion) => descargar('Personal_trabajadores', sede, [
@@ -33,7 +32,7 @@ export const exportarTrabajadores = (sede, filas, conRemuneracion) => descargar(
     { label: 'Área', width: 14, cell: (r) => t(r.area) },
     { label: 'Turno', width: 10, cell: (r) => t(r.turno) },
     { label: 'Vínculo', width: 16, cell: (r) => t(VINCULO_LABEL[r.vinculo] || r.vinculo) },
-    { label: 'Funciones', width: 22, cell: (r) => t((r.funciones || []).map((x) => FUNCION_LABEL[x] || x).join(', ')) },
+    { label: 'Funciones', width: 40, cell: (r) => t(r.funciones) },
     { label: 'Ingreso', width: 12, cell: (r) => f(r.fecha_ingreso) },
     { label: 'Cese', width: 12, cell: (r) => f(r.fecha_cese) },
     { label: 'Nacimiento', width: 12, cell: (r) => f(r.fecha_nacimiento) },
@@ -59,6 +58,9 @@ export const exportarEntregas = (sede, filas) => descargar('Personal_uniforme_EP
     { label: 'Elemento', width: 26, cell: (r) => t(r.elemento_nombre) },
     { label: 'Cantidad', width: 10, cell: (r) => n(r.cantidad) },
     { label: 'Devuelta', width: 10, cell: (r) => n(r.devuelta) },
+    { label: 'Fecha devolución', width: 15, cell: (r) => f(r.fecha_devolucion) },
+    { label: 'Dada de baja', width: 12, cell: (r) => n(r.baja) },
+    { label: 'Fecha baja', width: 12, cell: (r) => f(r.fecha_baja) },
     { label: 'Pendiente', width: 10, cell: (r) => n(r.pendiente) },
     { label: 'Talla', width: 8, cell: (r) => t(r.talla) },
     { label: 'Estado', width: 10, cell: (r) => t(ESTADO_ELEMENTO_LABEL[r.estado] || r.estado) },
@@ -104,37 +106,35 @@ export const exportarElementos = (sede, filas) => descargar('Personal_elementos_
     { label: 'Activo', width: 8, cell: (r) => t(Number(r.activo) ? 'Sí' : 'No') }
 ], filas);
 
+// Costos: solo el valor de EPP y uniformes vigentes, por trabajador y por area (dos hojas).
 export const exportarCostos = async (sede, data) => {
-    const conRem = data.incluye_remuneracion;
     const colsT = [
         { label: 'DNI', width: 11, cell: (r) => t(r.dni) },
-        { label: 'Trabajador', width: 28, cell: (r) => t(r.trabajador) },
-        { label: 'Área', width: 14, cell: (r) => t(r.area) },
-        { label: 'Cargo', width: 16, cell: (r) => t(r.cargo) },
-        { label: 'Días en el periodo', width: 16, cell: (r) => n(r.dias) },
-        ...(conRem ? [
-            { label: 'Remuneración mensual', width: 18, cell: (r) => s(r.remuneracion) },
-            { label: 'Remuneración del periodo', width: 20, cell: (r) => s(r.remuneracion_periodo) }
-        ] : []),
+        { label: 'Trabajador', width: 30, cell: (r) => t(r.trabajador) },
+        { label: 'Área', width: 16, cell: (r) => t(r.area) },
+        { label: 'Cargo', width: 18, cell: (r) => t(r.cargo) },
+        { label: 'Estado', width: 11, cell: (r) => t(ESTADO_LABEL[r.estado] || r.estado) },
         { label: 'EPP', width: 12, cell: (r) => s(r.costo_epp) },
         { label: 'Uniformes', width: 12, cell: (r) => s(r.costo_uniforme) },
-        { label: 'Costo total', width: 14, cell: (r) => s(r.costo_total) }
+        { label: 'Total EPP y uniforme', width: 20, cell: (r) => s(r.costo_total) }
     ];
     const colsA = [
         { label: 'Área', width: 18, cell: (r) => t(r.area) },
         { label: 'Trabajadores', width: 13, cell: (r) => n(r.trabajadores) },
-        ...(conRem ? [{ label: 'Remuneración del periodo', width: 20, cell: (r) => s(r.remuneracion_periodo) }] : []),
         { label: 'EPP', width: 12, cell: (r) => s(r.costo_epp) },
         { label: 'Uniformes', width: 12, cell: (r) => s(r.costo_uniforme) },
-        { label: 'Costo total', width: 14, cell: (r) => s(r.costo_total) }
+        { label: 'Total EPP y uniforme', width: 20, cell: (r) => s(r.costo_total) }
     ];
-    const hoja = (cols, filas) => [cols.map((c) => ({ value: c.label, ...HEADER })), ...filas.map((row) => cols.map((c) => c.cell(row)))];
-    const sedeArchivo = String(sede || 'Sede').normalize('NFD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
-    await writeXlsxFile([hoja(colsT, data.trabajadores), hoja(colsA, data.areas)], {
-        sheets: ['Por trabajador', 'Por área'],
-        columns: [colsT.map((c) => ({ width: c.width })), colsA.map((c) => ({ width: c.width }))],
-        fileName: `Personal_costos_${sedeArchivo}_${data.periodo.desde}_${data.periodo.hasta}.xlsx`
+    const hoja = (nombre, cols, filas) => ({
+        sheet: nombre,
+        data: [cols.map((c) => ({ value: c.label, ...HEADER })), ...filas.map((row) => cols.map((c) => c.cell(row)))],
+        columns: cols.map((c) => ({ width: c.width })),
+        stickyRowsCount: 1
     });
+    const sedeArchivo = String(sede || 'Sede').normalize('NFD').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
+    const periodo = [data.periodo?.desde, data.periodo?.hasta].filter(Boolean).join('_') || toPeruYmd();
+    await writeXlsxFile([hoja('Por trabajador', colsT, data.trabajadores), hoja('Por área', colsA, data.areas)])
+        .toFile(`Personal_costos_EPP_uniforme_${sedeArchivo}_${periodo}.xlsx`);
 };
 
 export const exportarCatalogo = (sede, nombre, filas, conHorario) => descargar(`Personal_${nombre}`, sede, [

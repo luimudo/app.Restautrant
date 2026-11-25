@@ -171,7 +171,7 @@ const Permisos = () => {
                                 {data.perfiles.map((perfil) => {
                                     const marcado = draft[perfil.codigo]?.has(modulo.clave) || false;
                                     const original = perfil.modulos.includes(modulo.clave);
-                                    const bloqueado = !data.editable || (perfil.codigo === 'administrador' && modulo.clave === 'settings');
+                                    const bloqueado = !data.editable || (perfil.codigo === 'administrador' && modulo.clave === 'settings') || (modulo.clave === 'permisos' && !data.puede_alcance);
                                     return (
                                         <td key={perfil.codigo} className={`px-3 py-3 text-center ${marcado !== original ? 'bg-amber-50' : ''}`}>
                                             {bloqueado && perfil.codigo === 'administrador' ? (

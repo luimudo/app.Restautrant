@@ -259,11 +259,11 @@ test('R-01: trabajador con adjunto de mas de 4 MB, entrega de EPP, control diari
     const dni = String(Date.now()).slice(-8);
     const trabajador = await api('POST', '/api/personal/trabajadores', {
         dni, nombres: 'Prueba', apellidos: `${ETIQUETA} Personal`, fecha_ingreso: `${hoy().slice(0, 7)}-01`, cargo_id: cargo.id, area_id: area.id,
-        turno_id: nuevoTurno.data.id, vinculo: 'planilla', remuneracion: 1500, funciones: ['mozo', 'caja'], telefono: '999888777'
+        turno_id: nuevoTurno.data.id, vinculo: 'planilla', remuneracion: 1500, funciones: 'Atención de mesas del salón y apoyo en caja', telefono: '999888777'
     });
     ok(trabajador, 201);
     limpieza.personal.push(trabajador.data.id);
-    assert.deepEqual(trabajador.data.funciones, ['mozo', 'caja']);
+    assert.equal(trabajador.data.funciones, 'Atención de mesas del salón y apoyo en caja', 'Las funciones se guardan como texto libre');
     assert.equal(trabajador.data.remuneracion, 1500);
 
     const duplicado = await api('POST', '/api/personal/trabajadores', { dni, nombres: 'Otro', apellidos: 'Duplicado' });
@@ -281,16 +281,28 @@ test('R-01: trabajador con adjunto de mas de 4 MB, entrega de EPP, control diari
     const noPermitido = await api('POST', `/api/personal/trabajadores/${trabajador.data.id}/adjuntos?nombre=x.exe`, Buffer.from('MZ ejecutable'));
     assert.equal(noPermitido.status, 400);
 
-    // Entrega con proximo cambio segun frecuencia y devolucion parcial
+    // Entrega con proximo cambio segun frecuencia, devolucion parcial y baja (cada una con su fecha)
     const entrega = await api('POST', '/api/personal/entregas', {
-        personal_id: trabajador.data.id, elemento_id: elemento.data.id, cantidad: 2, talla: 'M', estado: 'nuevo', motivo: 'Ingreso', fecha: hoy()
+        personal_id: trabajador.data.id, elemento_id: elemento.data.id, cantidad: 3, talla: 'M', estado: 'nuevo', motivo: 'Ingreso', fecha: hoy()
     });
     ok(entrega, 201);
-    assert.equal(entrega.data.costo_total, 50);
+    assert.equal(entrega.data.costo_total, 75);
     assert.ok(entrega.data.proximo_cambio > hoy());
     const devolucion = await api('POST', `/api/personal/entregas/${entrega.data.id}/devolver`, { cantidad: 1, estado: 'regular', motivo: 'Cambio de talla' });
     ok(devolucion);
-    assert.equal(devolucion.data.pendiente, 1);
+    assert.equal(devolucion.data.pendiente, 2);
+    assert.equal(devolucion.data.fecha_devolucion, hoy());
+    assert.equal(devolucion.data.fecha_baja, null);
+    const baja = await api('POST', `/api/personal/entregas/${entrega.data.id}/devolver`, { tipo: 'baja', cantidad: 1, estado: 'danado', motivo: 'Rotura' });
+    ok(baja);
+    assert.equal(baja.data.pendiente, 1);
+    assert.equal(baja.data.baja, 1);
+    assert.equal(baja.data.fecha_baja, hoy());
+    const historial = await api('GET', `/api/personal/entregas/${entrega.data.id}/movimientos`);
+    ok(historial);
+    assert.deepEqual(historial.data.map((h) => h.tipo), ['devolucion', 'baja']);
+    const anularConBaja = await api('POST', `/api/personal/entregas/${entrega.data.id}/anular`, { motivo: 'Prueba' });
+    assert.equal(anularConBaja.status, 409);
     const excesiva = await api('POST', `/api/personal/entregas/${entrega.data.id}/devolver`, { cantidad: 5, estado: 'bueno', motivo: 'Exceso' });
     assert.equal(excesiva.status, 409);
 
@@ -311,15 +323,26 @@ test('R-01: trabajador con adjunto de mas de 4 MB, entrega de EPP, control diari
     const esperado = Math.round((10000 * (marcas.length - 1)) / marcas.length) / 100;
     assert.equal(cerrado.data.cumplimiento, esperado);
 
-    // Costos del mes: remuneracion prorrateada + uniforme entregado
+    // Costos: solo el valor de EPP y uniforme vigente (3 entregados - 1 devuelto - 1 de baja = 1 x S/ 25), sin remuneracion
     const costos = await api('GET', `/api/personal/costos?desde=${hoy().slice(0, 7)}-01&hasta=${hoy()}`);
     ok(costos);
     const fila = costos.data.trabajadores.find((t) => t.personal_id === trabajador.data.id);
     assert.ok(fila);
-    assert.equal(fila.costo_uniforme, 50);
-    const dias = Number(hoy().slice(8, 10));
-    assert.equal(fila.remuneracion_periodo, Math.round(1500 * dias / 30 * 100) / 100);
+    assert.equal(fila.costo_uniforme, 25);
+    assert.equal(fila.costo_epp, 0);
+    assert.equal(fila.costo_total, 25);
+    assert.equal(fila.remuneracion_periodo, undefined, 'Costos ya no incluye la remuneracion');
     assert.ok(costos.data.areas.some((a) => a.area_id === area.id));
+    const sinPeriodo = await api('GET', '/api/personal/costos');
+    ok(sinPeriodo);
+    assert.ok(sinPeriodo.data.trabajadores.some((t) => t.personal_id === trabajador.data.id), 'Sin fechas se toma todo lo vigente');
+
+    // Consulta de DNI: un DNI con ficha avisa en vez de consultar RENIEC
+    const consulta = await api('GET', `/api/personal/consulta-dni/${dni}`);
+    ok(consulta);
+    assert.equal(consulta.data.existe, true);
+    assert.equal(consulta.data.personal_id, trabajador.data.id);
+    assert.equal((await api('GET', '/api/personal/consulta-dni/123')).status, 400);
 
     // Cese
     const cese = await api('PUT', `/api/personal/trabajadores/${trabajador.data.id}`, {

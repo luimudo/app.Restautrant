@@ -18,7 +18,9 @@ const MIMES_ADJUNTO = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/pn
 const TIPOS_ADJUNTO = ['contrato', 'dni', 'certificado', 'antecedentes', 'otro'];
 const VINCULOS = ['planilla', 'honorarios', 'locacion', 'practicante'];
 const ESTADOS = ['activo', 'vacaciones', 'suspendido', 'cesado'];
-const FUNCIONES = ['mozo', 'cocina', 'bar', 'caja', 'delivery', 'limpieza', 'administracion'];
+// Funciones del trabajador: texto libre (como el sistema concesionario). Estas etiquetas solo convierten los codigos antiguos.
+const FUNCIONES_ANTIGUAS = { mozo: 'Mozo', cocina: 'Cocina', bar: 'Bar', caja: 'Caja', delivery: 'Delivery', limpieza: 'Limpieza', administracion: 'Administración' };
+const TIPOS_MOVIMIENTO = ['devolucion', 'baja'];
 const ESTADOS_ELEMENTO = ['nuevo', 'bueno', 'regular', 'danado'];
 const CATALOGOS = {
     cargos: { tabla: 'personal_cargos', columna: 'cargo_id' },
@@ -66,7 +68,6 @@ const sumarMeses = (ymd, meses) => {
     const ultimo = new Date(Date.UTC(anio, mes, 0)).getUTCDate();
     return `${anio}-${String(mes).padStart(2, '0')}-${String(Math.min(d, ultimo)).padStart(2, '0')}`;
 };
-const diasEntre = (desde, hasta) => Math.round((Date.parse(`${hasta}T12:00:00Z`) - Date.parse(`${desde}T12:00:00Z`)) / 86400000);
 
 // --- Esquema ---
 const asegurarEsquema = async () => {
@@ -101,7 +102,7 @@ const asegurarEsquema = async () => {
         sistema_pension VARCHAR(60) NULL,
         cuspp VARCHAR(30) NULL,
         remuneracion DECIMAL(12,2) NULL,
-        funciones VARCHAR(200) NULL,
+        funciones TEXT NULL,
         telefono VARCHAR(40) NULL,
         email VARCHAR(120) NULL,
         direccion VARCHAR(300) NULL,
@@ -245,7 +246,41 @@ const asegurarEsquema = async () => {
         ['Calzado antideslizante', 'epp', 'PAR', 12, 1],
         ['Guantes anticorte', 'epp', 'PAR', 6, 0]
     ]);
+    await actualizarEsquema();
     listo = true;
+};
+
+/**
+ * Observaciones del cliente (nov. 2026), idempotente:
+ *   - funciones pasa de codigos fijos (VARCHAR) a texto libre (TEXT); los codigos antiguos se convierten a texto ("Mozo, Caja").
+ *   - devoluciones y bajas: epp_devoluciones.tipo y epp_entregas.baja (saldo vigente = cantidad - devuelta - baja).
+ */
+const actualizarEsquema = async () => {
+    const tipoColumna = async (tablaNombre, col) => {
+        const [rows] = await pool.query(
+            'SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?', [tablaNombre, col]);
+        return rows[0] ? String(rows[0].DATA_TYPE).toLowerCase() : null;
+    };
+    if ((await tipoColumna('personal', 'funciones')) === 'varchar') {
+        await pool.query('ALTER TABLE personal MODIFY funciones TEXT NULL');
+        console.log('personal.funciones ahora es texto libre');
+    }
+    // Codigos antiguos ("mozo,caja") -> texto ("Mozo, Caja"). Solo filas cuyas partes son todas codigos antiguos.
+    const [rows] = await pool.query("SELECT id, funciones FROM personal WHERE funciones REGEXP '^[a-z]+(,[a-z]+)*$'");
+    for (const r of rows) {
+        const partes = String(r.funciones).split(',').map((f) => f.trim()).filter(Boolean);
+        if (partes.length && partes.every((f) => FUNCIONES_ANTIGUAS[f])) {
+            await pool.query('UPDATE personal SET funciones = ? WHERE id = ?', [partes.map((f) => FUNCIONES_ANTIGUAS[f]).join(', '), r.id]);
+        }
+    }
+    if (!(await tipoColumna('epp_devoluciones', 'tipo'))) {
+        await pool.query("ALTER TABLE epp_devoluciones ADD COLUMN tipo VARCHAR(12) NOT NULL DEFAULT 'devolucion' AFTER entrega_id");
+        console.log('epp_devoluciones.tipo agregado');
+    }
+    if (!(await tipoColumna('epp_entregas', 'baja'))) {
+        await pool.query('ALTER TABLE epp_entregas ADD COLUMN baja DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER devuelta');
+        console.log('epp_entregas.baja agregado');
+    }
 };
 
 // --- Contexto del usuario ---
@@ -275,7 +310,7 @@ const TRABAJADOR_SQL = `
 const limpiarTrabajador = (req, row) => {
     if (!row) return row;
     const r = { ...row, remuneracion: row.remuneracion === null ? null : Number(row.remuneracion), adjuntos: Number(row.adjuntos || 0) };
-    r.funciones = row.funciones ? String(row.funciones).split(',').filter(Boolean) : [];
+    r.funciones = row.funciones ? String(row.funciones) : '';
     if (!puedeVerRemuneracion(req)) delete r.remuneracion;
     return r;
 };
@@ -309,8 +344,11 @@ const parseTrabajador = (body, req) => {
         ruc: texto(body?.ruc, 11),
         sistema_pension: texto(body?.sistema_pension, 60),
         cuspp: texto(body?.cuspp, 30),
-        funciones: (Array.isArray(body?.funciones) ? body.funciones : String(body?.funciones || '').split(','))
-            .map((f) => String(f).trim().toLowerCase()).filter((f) => FUNCIONES.includes(f)),
+        funciones: (() => {
+            const v = Array.isArray(body?.funciones) ? body.funciones.join(', ') : String(body?.funciones ?? '');
+            const t = v.replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ').trim();
+            return t ? t.slice(0, 4000) : null;
+        })(),
         telefono: texto(body?.telefono, 40),
         email: texto(body?.email, 120),
         direccion: texto(body?.direccion, 300),
@@ -342,7 +380,6 @@ const parseTrabajador = (body, req) => {
         }
     }
     if (errores.length) fail(400, errores.join('. '));
-    d.funciones = d.funciones.length ? [...new Set(d.funciones)].join(',') : null;
     return d;
 };
 
@@ -464,14 +501,16 @@ const parseElemento = (body) => {
 const ENTREGA_SQL = `
     SELECT e.*, DATE_FORMAT(e.fecha, '%Y-%m-%d') AS fecha, DATE_FORMAT(e.proximo_cambio, '%Y-%m-%d') AS proximo_cambio,
            p.dni, CONCAT(p.nombres, ' ', p.apellidos) AS trabajador, el.tipo AS elemento_tipo, el.unidad, a.nombre AS area,
-           ROUND(e.cantidad - e.devuelta, 2) AS pendiente, u.nombre AS usuario_nombre
+           ROUND(e.cantidad - e.devuelta - e.baja, 2) AS pendiente, u.nombre AS usuario_nombre,
+           (SELECT DATE_FORMAT(MAX(d.fecha), '%Y-%m-%d') FROM epp_devoluciones d WHERE d.entrega_id = e.id AND d.tipo = 'devolucion') AS fecha_devolucion,
+           (SELECT DATE_FORMAT(MAX(d.fecha), '%Y-%m-%d') FROM epp_devoluciones d WHERE d.entrega_id = e.id AND d.tipo = 'baja') AS fecha_baja
     FROM epp_entregas e
     JOIN personal p ON p.id = e.personal_id
     JOIN epp_elementos el ON el.id = e.elemento_id
     LEFT JOIN personal_areas a ON a.id = e.area_id
     LEFT JOIN usuarios u ON u.id = e.usuario_id
 `;
-const numerosEntrega = (e) => ({ ...e, cantidad: Number(e.cantidad), devuelta: Number(e.devuelta), pendiente: Number(e.pendiente),
+const numerosEntrega = (e) => ({ ...e, cantidad: Number(e.cantidad), devuelta: Number(e.devuelta), baja: Number(e.baja || 0), pendiente: Number(e.pendiente),
     costo_unitario: Number(e.costo_unitario), costo_total: Number(e.costo_total) });
 
 const registrarEntrega = async (req) => {
@@ -663,56 +702,79 @@ const cerrarControl = async (req, id) => {
 
 // --- Costos por trabajador y area ---
 /**
- * Costo del periodo: remuneracion mensual prorrateada por los dias en que el trabajador estuvo vinculado dentro del periodo
- * (dias / 30) mas el costo de EPP y uniformes entregados en el periodo (entregas no anuladas).
+ * Como el sistema concesionario: solo el costo de los uniformes y EPP que el trabajador tiene en su poder
+ * (saldo vigente = cantidad - devuelto - dado de baja, entregas no anuladas). El area es la que tenia al recibirlos.
+ * El periodo (fecha de entrega) es opcional: sin fechas se toma todo lo vigente.
  */
 const costos = async (req) => {
-    const hoy = hoyLima();
-    const desde = esFecha(req.query.desde) ? req.query.desde : `${hoy.slice(0, 7)}-01`;
-    const hasta = esFecha(req.query.hasta) ? req.query.hasta : hoy;
-    if (desde > hasta) fail(400, 'Rango de fechas invalido');
-    const verRemuneracion = puedeVerRemuneracion(req);
+    const desde = esFecha(req.query.desde) ? req.query.desde : null;
+    const hasta = esFecha(req.query.hasta) ? req.query.hasta : null;
+    if (desde && hasta && desde > hasta) fail(400, 'Rango de fechas invalido');
     const areaId = idOpcional(req.query.area_id);
-    const [trabajadores] = await pool.query(
-        `SELECT p.id, p.dni, CONCAT(p.nombres, ' ', p.apellidos) AS trabajador, p.area_id, COALESCE(a.nombre, 'Sin área') AS area,
-                c.nombre AS cargo, p.estado, p.remuneracion,
-                DATE_FORMAT(p.fecha_ingreso, '%Y-%m-%d') AS fecha_ingreso, DATE_FORMAT(p.fecha_cese, '%Y-%m-%d') AS fecha_cese,
-                COALESCE(SUM(CASE WHEN el.tipo = 'epp' THEN e.costo_total END), 0) AS costo_epp,
-                COALESCE(SUM(CASE WHEN el.tipo = 'uniforme' THEN e.costo_total END), 0) AS costo_uniforme,
-                COUNT(e.id) AS entregas
-         FROM personal p
-         LEFT JOIN personal_areas a ON a.id = p.area_id
+    const cond = ['e.sede_id = ?', 'e.anulada = 0', '(e.cantidad - e.devuelta - e.baja) > 0'];
+    const params = [sedeDe(req)];
+    if (desde) { cond.push('e.fecha >= ?'); params.push(desde); }
+    if (hasta) { cond.push('e.fecha <= ?'); params.push(hasta); }
+    if (areaId) { cond.push('COALESCE(e.area_id, p.area_id) = ?'); params.push(areaId); }
+    const [rows] = await pool.query(
+        `SELECT p.id AS personal_id, p.dni, CONCAT(p.apellidos, ', ', p.nombres) AS trabajador, p.estado, c.nombre AS cargo,
+                COALESCE(e.area_id, p.area_id) AS area_id, COALESCE(a.nombre, 'Sin área') AS area,
+                ROUND(SUM(e.cantidad - e.devuelta - e.baja), 2) AS cantidad,
+                ROUND(SUM(CASE WHEN el.tipo = 'epp' THEN (e.cantidad - e.devuelta - e.baja) * e.costo_unitario ELSE 0 END), 2) AS costo_epp,
+                ROUND(SUM(CASE WHEN el.tipo = 'uniforme' THEN (e.cantidad - e.devuelta - e.baja) * e.costo_unitario ELSE 0 END), 2) AS costo_uniforme
+         FROM epp_entregas e
+         JOIN personal p ON p.id = e.personal_id
+         JOIN epp_elementos el ON el.id = e.elemento_id
+         LEFT JOIN personal_areas a ON a.id = COALESCE(e.area_id, p.area_id)
          LEFT JOIN personal_cargos c ON c.id = p.cargo_id
-         LEFT JOIN epp_entregas e ON e.personal_id = p.id AND e.anulada = 0 AND e.fecha BETWEEN ? AND ?
-         LEFT JOIN epp_elementos el ON el.id = e.elemento_id
-         WHERE p.sede_id = ? ${areaId ? 'AND p.area_id = ?' : ''}
-           AND (p.fecha_ingreso IS NULL OR p.fecha_ingreso <= ?) AND (p.fecha_cese IS NULL OR p.fecha_cese >= ?)
-         GROUP BY p.id, p.dni, p.nombres, p.apellidos, p.area_id, a.nombre, c.nombre, p.estado, p.remuneracion, p.fecha_ingreso, p.fecha_cese
+         WHERE ${cond.join(' AND ')}
+         GROUP BY p.id, p.dni, p.apellidos, p.nombres, p.estado, c.nombre, COALESCE(e.area_id, p.area_id), a.nombre
          ORDER BY area, trabajador`,
-        areaId ? [desde, hasta, sedeDe(req), areaId, hasta, desde] : [desde, hasta, sedeDe(req), hasta, desde]
+        params
     );
-    const filas = trabajadores.map((t) => {
-        const inicio = t.fecha_ingreso && t.fecha_ingreso > desde ? t.fecha_ingreso : desde;
-        const fin = t.fecha_cese && t.fecha_cese < hasta ? t.fecha_cese : hasta;
-        const dias = Math.max(0, diasEntre(inicio, fin) + 1);
-        const remuneracionPeriodo = verRemuneracion && t.remuneracion !== null ? redondear((Number(t.remuneracion) * dias) / 30) : 0;
-        const fila = {
-            personal_id: t.id, dni: t.dni, trabajador: t.trabajador, area_id: t.area_id, area: t.area, cargo: t.cargo, estado: t.estado,
-            dias, costo_epp: Number(t.costo_epp), costo_uniforme: Number(t.costo_uniforme), entregas: Number(t.entregas),
-            remuneracion_periodo: remuneracionPeriodo
-        };
-        if (verRemuneracion) fila.remuneracion = t.remuneracion === null ? null : Number(t.remuneracion);
-        fila.costo_total = redondear(fila.costo_epp + fila.costo_uniforme + remuneracionPeriodo);
+    const trabajadores = rows.map((r) => {
+        const fila = { ...r, cantidad: Number(r.cantidad), costo_epp: Number(r.costo_epp), costo_uniforme: Number(r.costo_uniforme) };
+        fila.costo_total = redondear(fila.costo_epp + fila.costo_uniforme);
         return fila;
     });
     const areas = [];
-    for (const f of filas) {
+    for (const f of trabajadores) {
         let a = areas.find((x) => x.area === f.area);
-        if (!a) areas.push(a = { area_id: f.area_id, area: f.area, trabajadores: 0, costo_epp: 0, costo_uniforme: 0, remuneracion_periodo: 0, costo_total: 0 });
+        if (!a) areas.push(a = { area_id: f.area_id, area: f.area, trabajadores: 0, cantidad: 0, costo_epp: 0, costo_uniforme: 0, costo_total: 0 });
         a.trabajadores += 1;
-        for (const k of ['costo_epp', 'costo_uniforme', 'remuneracion_periodo', 'costo_total']) a[k] = redondear(a[k] + f[k]);
+        for (const k of ['cantidad', 'costo_epp', 'costo_uniforme', 'costo_total']) a[k] = redondear(a[k] + f[k]);
     }
-    return { periodo: { desde, hasta }, incluye_remuneracion: verRemuneracion, trabajadores: filas, areas };
+    return { periodo: { desde, hasta }, trabajadores, areas };
+};
+
+// --- Consulta de DNI (RENIEC via Decolecta, como el sistema de bebidas) ---
+const consultarDni = async (req) => {
+    const dni = String(req.params.dni || '').trim();
+    if (!/^\d{8}$/.test(dni)) fail(400, 'El DNI debe tener 8 digitos');
+    const [existe] = await pool.query(
+        "SELECT p.id, p.sede_id, CONCAT(p.apellidos, ', ', p.nombres) AS trabajador, s.nombre AS sede FROM personal p JOIN sedes s ON s.id = p.sede_id WHERE p.dni = ?", [dni]);
+    if (existe[0]) {
+        const mismaSede = Number(existe[0].sede_id) === Number(sedeDe(req));
+        return { existe: true, personal_id: mismaSede ? existe[0].id : null, trabajador: existe[0].trabajador, sede: existe[0].sede, misma_sede: mismaSede };
+    }
+    const token = process.env.DECOLECTA_TOKEN || process.env.APISPERU_TOKEN;
+    if (!token) fail(503, 'La consulta a RENIEC no esta configurada (DECOLECTA_TOKEN). Registre los datos manualmente.');
+    let respuesta;
+    try {
+        respuesta = await fetch(`https://api.decolecta.com/v1/reniec/dni?numero=${dni}`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, signal: AbortSignal.timeout(8000), redirect: 'error'
+        });
+    } catch {
+        fail(502, 'No se pudo conectar con RENIEC. Registre los datos manualmente.');
+    }
+    if (respuesta.status === 404 || respuesta.status === 422) fail(404, 'RENIEC no encontro ese DNI');
+    if (!respuesta.ok) fail(502, 'El servicio de consulta no esta disponible. Registre los datos manualmente.');
+    const datos = await respuesta.json().catch(() => null);
+    if (!datos || String(datos.document_number || dni) !== dni) fail(502, 'El servicio devolvio datos de otro documento');
+    const nombres = texto(datos.first_name, 120);
+    const apellidos = texto([datos.first_last_name, datos.second_last_name].filter(Boolean).join(' '), 120);
+    if (!nombres && !datos.full_name) fail(404, 'RENIEC no encontro ese DNI');
+    return { existe: false, dni, nombres: nombres || texto(datos.full_name, 120), apellidos: apellidos || '', fuente: 'RENIEC' };
 };
 
 // --- Rutas ---
@@ -737,7 +799,7 @@ const registrar = (app, { allowAdmin }) => {
         return {
             cargos, areas, turnos, usuarios,
             elementos: elementos.map((e) => ({ ...e, costo_unitario: e.costo_unitario === null ? null : Number(e.costo_unitario) })),
-            vinculos: VINCULOS, estados: ESTADOS, funciones: FUNCIONES, tipos_adjunto: TIPOS_ADJUNTO, estados_elemento: ESTADOS_ELEMENTO,
+            vinculos: VINCULOS, estados: ESTADOS, tipos_adjunto: TIPOS_ADJUNTO, estados_elemento: ESTADOS_ELEMENTO,
             puede_ver_remuneracion: puedeVerRemuneracion(req), max_adjunto: MAX_ADJUNTO
         };
     });
@@ -751,14 +813,14 @@ const registrar = (app, { allowAdmin }) => {
         const cond = ['x.sede_id = ?'];
         const params = [sedeDe(req)];
         if (req.query.q) {
-            cond.push("CONCAT_WS(' ', x.dni, x.codigo, x.nombres, x.apellidos) LIKE ?");
+            cond.push("CONCAT_WS(' ', x.dni, x.codigo, x.nombres, x.apellidos, x.funciones) LIKE ?");
             params.push(`%${String(req.query.q).trim()}%`);
         }
         if (ESTADOS.includes(req.query.estado)) { cond.push('x.estado = ?'); params.push(req.query.estado); }
         for (const [k, col] of [['area_id', 'x.area_id'], ['cargo_id', 'x.cargo_id'], ['turno_id', 'x.turno_id']]) {
             if (Number(req.query[k])) { cond.push(`${col} = ?`); params.push(Number(req.query[k])); }
         }
-        if (FUNCIONES.includes(req.query.funcion)) { cond.push('FIND_IN_SET(?, x.funciones) > 0'); params.push(req.query.funcion); }
+        if (req.query.funcion) { cond.push('x.funciones LIKE ?'); params.push(`%${String(req.query.funcion).trim()}%`); }
         const [rows] = await pool.query(`${TRABAJADOR_SQL} WHERE ${cond.join(' AND ')} ORDER BY x.estado = 'cesado', x.apellidos, x.nombres LIMIT 2000`, params);
         return rows.map((r) => limpiarTrabajador(req, r));
     });
@@ -769,6 +831,7 @@ const registrar = (app, { allowAdmin }) => {
         t.documentos = await listarAdjuntos(t.id);
         return t;
     });
+    ruta('get', '/consulta-dni/:dni', async (req) => consultarDni(req));
     ruta('post', '/trabajadores', async (req, res) => { res.status(201); return guardarTrabajador(req, null); });
     ruta('put', '/trabajadores/:id', async (req) => guardarTrabajador(req, Number(req.params.id)));
 
@@ -829,32 +892,35 @@ const registrar = (app, { allowAdmin }) => {
         if (Number(req.query.elemento_id)) { cond.push('e.elemento_id = ?'); params.push(Number(req.query.elemento_id)); }
         if (req.query.tipo === 'epp' || req.query.tipo === 'uniforme') { cond.push('el.tipo = ?'); params.push(req.query.tipo); }
         if (req.query.vista === 'por_cambiar') {
-            cond.push('e.anulada = 0 AND e.devuelta < e.cantidad AND e.proximo_cambio IS NOT NULL AND e.proximo_cambio <= DATE_ADD(CURDATE(), INTERVAL 15 DAY)');
+            cond.push('e.anulada = 0 AND (e.devuelta + e.baja) < e.cantidad AND e.proximo_cambio IS NOT NULL AND e.proximo_cambio <= DATE_ADD(CURDATE(), INTERVAL 15 DAY)');
         }
-        if (req.query.vista === 'por_devolver') cond.push('e.anulada = 0 AND e.devuelta < e.cantidad');
+        if (req.query.vista === 'por_devolver') cond.push('e.anulada = 0 AND (e.devuelta + e.baja) < e.cantidad');
         const [rows] = await pool.query(`${ENTREGA_SQL} WHERE ${cond.join(' AND ')} ORDER BY e.fecha DESC, e.id DESC LIMIT 3000`, params);
         return rows.map(numerosEntrega);
     });
     ruta('post', '/entregas', async (req, res) => { res.status(201); return registrarEntrega(req); });
+    // Devolucion o baja (tipo = 'devolucion' | 'baja'), con su fecha: ambas descuentan del saldo vigente de la entrega.
     ruta('post', '/entregas/:id/devolver', async (req) => {
         const b = req.body || {};
+        const tipo = TIPOS_MOVIMIENTO.includes(b.tipo) ? b.tipo : 'devolucion';
+        const accion = tipo === 'baja' ? 'La baja' : 'La devolucion';
         const cantidad = redondear(b.cantidad);
         const fecha = String(b.fecha || hoyLima()).slice(0, 10);
         const estado = String(b.estado || 'bueno').toLowerCase();
         const motivo = texto(b.motivo, 500);
-        if (!(cantidad > 0)) fail(400, 'La cantidad a devolver debe ser mayor a 0');
+        if (!(cantidad > 0)) fail(400, `${accion} debe tener una cantidad mayor a 0`);
         if (!ESTADOS_ELEMENTO.includes(estado)) fail(400, 'El estado no es valido');
-        if (!motivo || motivo.length < 3) fail(400, 'Indique el motivo de la devolucion');
+        if (!motivo || motivo.length < 3) fail(400, `Indique el motivo de ${tipo === 'baja' ? 'la baja' : 'la devolucion'}`);
         const connection = await pool.getConnection();
         try {
             await connection.beginTransaction();
             const e = await buscarEntrega(connection, req, Number(req.params.id));
             if (Number(e.anulada)) fail(409, 'La entrega esta anulada');
-            if (cantidad > e.pendiente) fail(409, `La devolucion supera lo pendiente (${e.pendiente})`);
-            if (!esFecha(fecha) || fecha < e.fecha || fecha > hoyLima()) fail(400, 'La devolucion debe ser entre la entrega y hoy');
-            await connection.query('INSERT INTO epp_devoluciones (entrega_id, cantidad, fecha, estado, motivo, usuario_id) VALUES (?, ?, ?, ?, ?, ?)',
-                [e.id, cantidad, fecha, estado, motivo, req.userContext.id]);
-            await connection.query('UPDATE epp_entregas SET devuelta = devuelta + ? WHERE id = ?', [cantidad, e.id]);
+            if (cantidad > e.pendiente) fail(409, `${accion} supera lo pendiente (${e.pendiente})`);
+            if (!esFecha(fecha) || fecha < e.fecha || fecha > hoyLima()) fail(400, `${accion} debe ser entre la entrega y hoy`);
+            await connection.query('INSERT INTO epp_devoluciones (entrega_id, tipo, cantidad, fecha, estado, motivo, usuario_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [e.id, tipo, cantidad, fecha, estado, motivo, req.userContext.id]);
+            await connection.query(`UPDATE epp_entregas SET ${tipo === 'baja' ? 'baja = baja' : 'devuelta = devuelta'} + ? WHERE id = ?`, [cantidad, e.id]);
             await connection.commit();
         } catch (err) {
             await connection.rollback();
@@ -865,6 +931,14 @@ const registrar = (app, { allowAdmin }) => {
         const [rows] = await pool.query(`${ENTREGA_SQL} WHERE e.id = ?`, [Number(req.params.id)]);
         return numerosEntrega(rows[0]);
     });
+    // Historial de devoluciones y bajas de una entrega.
+    ruta('get', '/entregas/:id/movimientos', async (req) => {
+        const [rows] = await pool.query(
+            `SELECT d.id, d.tipo, d.cantidad, DATE_FORMAT(d.fecha, '%Y-%m-%d') AS fecha, d.estado, d.motivo, u.nombre AS usuario_nombre, d.creado_en
+             FROM epp_devoluciones d JOIN epp_entregas e ON e.id = d.entrega_id LEFT JOIN usuarios u ON u.id = d.usuario_id
+             WHERE d.entrega_id = ? AND e.sede_id = ? ORDER BY d.fecha, d.id`, [Number(req.params.id), sedeDe(req)]);
+        return rows.map((r) => ({ ...r, cantidad: Number(r.cantidad) }));
+    });
     ruta('post', '/entregas/:id/anular', async (req) => {
         const motivo = texto(req.body?.motivo, 255);
         if (!motivo || motivo.length < 3) fail(400, 'Indique el motivo de la anulacion');
@@ -873,7 +947,7 @@ const registrar = (app, { allowAdmin }) => {
             await connection.beginTransaction();
             const e = await buscarEntrega(connection, req, Number(req.params.id));
             if (Number(e.anulada)) fail(409, 'La entrega ya esta anulada');
-            if (e.devuelta > 0) fail(409, 'La entrega tiene devoluciones registradas');
+            if (e.devuelta > 0 || e.baja > 0) fail(409, 'La entrega tiene devoluciones o bajas registradas');
             await connection.query('UPDATE epp_entregas SET anulada = 1, motivo_anulacion = ? WHERE id = ?', [motivo, e.id]);
             if (e.control_detalle_id) await connection.query('UPDATE epp_control_detalle SET reposicion_id = NULL WHERE id = ?', [e.control_detalle_id]);
             await connection.commit();

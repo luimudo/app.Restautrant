@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { UserCog, Shield, Plus, Edit2, Trash2, Hash, Layers, Utensils } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { SUPERADMIN } from '../security/accessControl';
+import { SUPERADMIN, MODULES } from '../security/accessControl';
 import FacturacionConfig from '../components/settings/FacturacionConfig';
 import { formatDateTime } from '../utils/dateTime';
 
@@ -18,7 +18,7 @@ const CORRELATIVO_LABEL = {
 };
 
 const Settings = () => {
-    const { isSystemSuperadmin: isSuperadmin, sedes, activeSede, activeSedeId, profileLabel } = useAuth();
+    const { isSystemSuperadmin: isSuperadmin, sedes, activeSede, activeSedeId, profileLabel, canAccess } = useAuth();
     const [loading, setLoading] = useState(true);
     const [message, setMessage] = useState('');
     const [error, setError] = useState('');
@@ -348,7 +348,7 @@ const Settings = () => {
                 <p className="text-xs text-gray-500 mb-4">
                     Perfiles disponibles: {perfiles.map((p) => profileLabel(p)).join(', ')}.{' '}
                     {!isSuperadmin && 'Los perfiles multisede (p. ej. Contador) los asigna el super administrador. '}
-                    <Link to="/permisos" className="font-bold text-brand-600 hover:underline">Ver o editar los permisos de cada perfil</Link>
+                    {canAccess(MODULES.permisos) && <Link to="/permisos" className="font-bold text-brand-600 hover:underline">Ver o editar los permisos de cada perfil</Link>}
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_220px] gap-3 mb-4">
                     <input

@@ -423,8 +423,9 @@ app.post('/api/permisos/perfiles', allowAdmin, async (req, res) => {
             'INSERT INTO perfiles (codigo, nombre, descripcion, base, alcance, sistema) VALUES (?, ?, ?, ?, ?, 0)',
             [codigo, nombre, descripcion, base, alcance]
         );
-        if (copiarDe && copiarDe.modulos.size > 0) {
-            await pool.query('INSERT INTO perfil_modulos (perfil, modulo) VALUES ?', [[...copiarDe.modulos].map((m) => [codigo, m])]);
+        const copiados = copiarDe ? [...copiarDe.modulos].filter((m) => isSuperadmin(req) || m !== 'permisos') : [];
+        if (copiados.length > 0) {
+            await pool.query('INSERT INTO perfil_modulos (perfil, modulo) VALUES ?', [copiados.map((m) => [codigo, m])]);
         }
         await permisos.recargar();
         res.status(201).json(perfilPublico(permisos.get(codigo), await perfilesConUsuarios()));
@@ -443,6 +444,10 @@ app.put('/api/permisos/perfiles/:codigo', allowAdmin, async (req, res) => {
     // Without settings the administrador could not open this screen again.
     if (modulos && perfil.codigo === 'administrador' && !modulos.includes('settings')) {
         return res.status(409).json({ error: 'El administrador debe conservar el modulo de configuracion' });
+    }
+    // Solo el super admin decide quien entra a esta pantalla de perfiles y permisos.
+    if (modulos && !isSuperadmin(req) && modulos.includes('permisos') !== perfil.modulos.has('permisos')) {
+        return res.status(403).json({ error: 'Solo el super administrador otorga o quita el acceso a Perfiles y permisos' });
     }
     const nombre = req.body?.nombre !== undefined ? String(req.body.nombre).trim().replace(/\s+/g, ' ').slice(0, 60) : perfil.nombre;
     if (!nombre) return res.status(400).json({ error: 'Ingrese el nombre del perfil' });
@@ -969,20 +974,75 @@ const buildCashSessionSummary = async (connection, sessionId, sedeId) => {
 };
 
 // --- Cajas ---
+// Observaciones nov. 2026: cada caja se asocia a sede, almacen y usuarios (varios, uno por turno). Solo el administrador,
+// el contador con el modulo Facturacion y el super admin operan todas las cajas; los demas usuarios solo ven y operan las
+// cajas que tienen asignadas (abrir, cerrar, movimientos, arqueos y ventas).
+let tieneCajaUsuarios = false;
+const CAJA_AJENA = 'Esta caja no esta asignada a su usuario: solo puede operar las cajas que le asigno el administrador';
+const operaTodasLasCajas = (req) => {
+    const ctx = req.userContext;
+    if (!ctx) return false;
+    if (ctx.perfil === SUPERADMIN || ctx.perfil === 'administrador') return true;
+    return ctx.perfil === 'contador' && ctx.modulos.has('billing');
+};
+/** null = todas las cajas; si no, los ids de las cajas asignadas al usuario. */
+const cajasDelUsuario = async (connection, req) => {
+    if (operaTodasLasCajas(req) || !tieneCajaUsuarios) return null;
+    const [rows] = await connection.query('SELECT caja_id FROM caja_usuarios WHERE usuario_id = ?', [req.userContext.id]);
+    return rows.map((r) => Number(r.caja_id));
+};
+const puedeOperarCaja = async (connection, req, cajaId) => {
+    const ids = await cajasDelUsuario(connection, req);
+    return ids === null || ids.includes(Number(cajaId));
+};
+/** Para rutas por sesion: true si la sesion no existe (la ruta responde 404) o si su caja es del usuario. */
+const puedeOperarSesion = async (connection, req, sesionId) => {
+    const [rows] = await connection.query('SELECT caja_id FROM caja_sesiones WHERE id = ?', [sesionId]);
+    return !rows[0] || puedeOperarCaja(connection, req, rows[0].caja_id);
+};
+/** Usuarios de cada caja, para el mantenimiento de cajas. */
+const usuariosDeCajas = async (cajaIds) => {
+    if (!tieneCajaUsuarios || cajaIds.length === 0) return new Map();
+    const [rows] = await pool.query(
+        `SELECT cu.caja_id, u.id, u.nombre, u.usuario, u.rol AS perfil FROM caja_usuarios cu JOIN usuarios u ON u.id = cu.usuario_id
+         WHERE cu.caja_id IN (?) ORDER BY u.nombre`, [cajaIds]);
+    const mapa = new Map();
+    for (const r of rows) {
+        if (!mapa.has(r.caja_id)) mapa.set(r.caja_id, []);
+        mapa.get(r.caja_id).push({ id: r.id, nombre: r.nombre, usuario: r.usuario, perfil: r.perfil });
+    }
+    return mapa;
+};
+/** Valida y guarda los usuarios de una caja (solo usuarios de la misma sede). Sin usuario_ids en el cuerpo no cambia nada. */
+const guardarUsuariosCaja = async (connection, cajaId, sedeId, usuarioIds) => {
+    if (!tieneCajaUsuarios || !Array.isArray(usuarioIds)) return;
+    const ids = [...new Set(usuarioIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    if (ids.length > 0) {
+        const [validos] = await connection.query('SELECT id FROM usuarios WHERE id IN (?) AND sede_id = ?', [ids, sedeId]);
+        if (validos.length !== ids.length) throw httpError(400, 'Solo puede asignar usuarios de la misma sede a la caja');
+    }
+    await connection.query('DELETE FROM caja_usuarios WHERE caja_id = ?', [cajaId]);
+    if (ids.length > 0) await connection.query('INSERT INTO caja_usuarios (caja_id, usuario_id) VALUES ?', [ids.map((u) => [cajaId, u])]);
+};
+
 // R-02: varias cajas por sede; cada una vende desde su almacen (sin almacen: el de ventas por defecto de la sede).
 // ?todas=1 incluye las inactivas (pantalla de mantenimiento); por defecto solo las activas.
 app.get('/api/cajas', allowAdminOrCashier, requireSede, async (req, res) => {
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (permitidas !== null && permitidas.length === 0) return res.json([]);
+        const filtro = permitidas === null ? '' : ' AND c.id IN (?)';
         const [rows] = await pool.query(
             tieneCajaAlmacen
                 ? `SELECT c.*, a.nombre AS almacen_nombre, a.codigo AS almacen_codigo,
                           (SELECT s.id FROM caja_sesiones s WHERE s.caja_id = c.id AND s.estado = 'abierta' LIMIT 1) AS sesion_abierta_id
                    FROM cajas c LEFT JOIN almacenes a ON a.id = c.almacen_id
-                   WHERE c.sede_id = ? ${req.query.todas ? '' : 'AND c.activo = 1'} ORDER BY c.activo DESC, c.descripcion ASC`
-                : 'SELECT * FROM cajas WHERE sede_id = ?',
-            [sedeOf(req)]
+                   WHERE c.sede_id = ? ${req.query.todas ? '' : 'AND c.activo = 1'}${filtro} ORDER BY c.activo DESC, c.descripcion ASC`
+                : `SELECT * FROM cajas c WHERE c.sede_id = ?${filtro}`,
+            permitidas === null ? [sedeOf(req)] : [sedeOf(req), permitidas]
         );
-        res.json(rows);
+        const usuarios = await usuariosDeCajas(rows.map((c) => c.id));
+        res.json(rows.map((c) => ({ ...c, usuarios: usuarios.get(c.id) || [] })));
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1003,6 +1063,16 @@ const parseCajaInput = async (connection, body, sedeId) => {
     return { descripcion, almacenId, activo };
 };
 
+// Usuarios de la sede que se pueden asignar a una caja (mantenimiento de cajas).
+app.get('/api/cajas/usuarios-asignables', allowAdmin, requireSede, async (req, res) => {
+    try {
+        const [rows] = await pool.query('SELECT id, nombre, usuario, rol AS perfil FROM usuarios WHERE sede_id = ? ORDER BY nombre', [sedeOf(req)]);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post('/api/cajas', allowAdmin, requireSede, async (req, res) => {
     try {
         const sedeId = sedeOf(req);
@@ -1015,11 +1085,22 @@ app.post('/api/cajas', allowAdmin, requireSede, async (req, res) => {
         const data = await parseCajaInput(pool, req.body, sedeId);
         const [dup] = await pool.query('SELECT id FROM cajas WHERE sede_id = ? AND descripcion = ?', [sedeId, data.descripcion]);
         if (dup.length > 0) return res.status(409).json({ error: 'Ya existe una caja con esa descripcion en la sede' });
-        const [result] = await pool.query(
-            'INSERT INTO cajas (sede_id, descripcion, saldo, estado, almacen_id, activo) VALUES (?, ?, 0, ?, ?, ?)',
-            [sedeId, data.descripcion, 'cerrada', data.almacenId, data.activo]
-        );
-        res.status(201).json({ id: result.insertId, sede_id: sedeId, descripcion: data.descripcion, estado: 'cerrada', almacen_id: data.almacenId, activo: data.activo });
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            const [result] = await connection.query(
+                'INSERT INTO cajas (sede_id, descripcion, saldo, estado, almacen_id, activo) VALUES (?, ?, 0, ?, ?, ?)',
+                [sedeId, data.descripcion, 'cerrada', data.almacenId, data.activo]
+            );
+            await guardarUsuariosCaja(connection, result.insertId, sedeId, req.body?.usuario_ids);
+            await connection.commit();
+            res.status(201).json({ id: result.insertId, sede_id: sedeId, descripcion: data.descripcion, estado: 'cerrada', almacen_id: data.almacenId, activo: data.activo });
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
     } catch (err) {
         res.status(err.status || 500).json({ error: err.message });
     }
@@ -1038,7 +1119,18 @@ app.put('/api/cajas/:id', allowAdmin, requireSede, async (req, res) => {
             const [abiertas] = await pool.query("SELECT id FROM caja_sesiones WHERE caja_id = ? AND estado = 'abierta' LIMIT 1", [req.params.id]);
             if (abiertas.length > 0) return res.status(409).json({ error: 'La caja tiene una sesion abierta: cierrela antes de desactivarla' });
         }
-        await pool.query('UPDATE cajas SET descripcion = ?, almacen_id = ?, activo = ? WHERE id = ?', [data.descripcion, data.almacenId, data.activo, req.params.id]);
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            await connection.query('UPDATE cajas SET descripcion = ?, almacen_id = ?, activo = ? WHERE id = ?', [data.descripcion, data.almacenId, data.activo, req.params.id]);
+            await guardarUsuariosCaja(connection, Number(req.params.id), sedeId, req.body?.usuario_ids);
+            await connection.commit();
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
         res.json({ id: Number(req.params.id), descripcion: data.descripcion, almacen_id: data.almacenId, activo: data.activo });
     } catch (err) {
         res.status(err.status || 500).json({ error: err.message });
@@ -1049,13 +1141,17 @@ app.get('/api/caja/sesion-activa', allowAdminOrCashier, requireSede, async (req,
     const cajaId = req.query.caja_id ? Number(req.query.caja_id) : null;
     const sedeId = sedeOf(req);
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (cajaId && permitidas !== null && !permitidas.includes(cajaId)) return res.status(403).json({ error: CAJA_AJENA });
+        if (!cajaId && permitidas !== null && permitidas.length === 0) return res.json(null);
+        const filtro = cajaId ? 'AND caja_id = ?' : permitidas !== null ? 'AND caja_id IN (?)' : '';
         const [rows] = await pool.query(`
             SELECT id
             FROM caja_sesiones
-            WHERE estado = 'abierta' AND sede_id = ? ${cajaId ? 'AND caja_id = ?' : ''}
+            WHERE estado = 'abierta' AND sede_id = ? ${filtro}
             ORDER BY fecha_apertura DESC
             LIMIT 1
-        `, cajaId ? [sedeId, cajaId] : [sedeId]);
+        `, cajaId ? [sedeId, cajaId] : permitidas !== null ? [sedeId, permitidas] : [sedeId]);
 
         if (rows.length === 0) {
             return res.json(null);
@@ -1071,12 +1167,14 @@ app.get('/api/caja/sesion-activa', allowAdminOrCashier, requireSede, async (req,
 // Open sessions of the sede, one per caja: the sale picks the caja it is registered in.
 app.get('/api/caja/sesiones-abiertas', allowAdminOrCashier, requireSede, async (req, res) => {
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (permitidas !== null && permitidas.length === 0) return res.json([]);
         const [rows] = await pool.query(
             `SELECT s.id, s.caja_id, c.descripcion AS caja_descripcion, s.fecha_apertura${tieneCajaAlmacen ? ', a.nombre AS almacen_nombre' : ''}
              FROM caja_sesiones s JOIN cajas c ON c.id = s.caja_id
              ${tieneCajaAlmacen ? 'LEFT JOIN almacenes a ON a.id = c.almacen_id' : ''}
-             WHERE s.sede_id = ? AND s.estado = 'abierta' ORDER BY c.descripcion ASC`,
-            [sedeOf(req)]
+             WHERE s.sede_id = ? AND s.estado = 'abierta'${permitidas === null ? '' : ' AND s.caja_id IN (?)'} ORDER BY c.descripcion ASC`,
+            permitidas === null ? [sedeOf(req)] : [sedeOf(req), permitidas]
         );
         res.json(rows);
     } catch (err) {
@@ -1094,6 +1192,11 @@ app.post('/api/caja/apertura', allowAdminOrCashier, requireSede, async (req, res
 
     if (!cajaId) {
         return res.status(400).json({ error: 'caja_id es obligatorio' });
+    }
+    try {
+        if (!(await puedeOperarCaja(pool, req, cajaId))) return res.status(403).json({ error: CAJA_AJENA });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
     }
 
     const connection = await pool.getConnection();
@@ -1145,6 +1248,7 @@ app.get('/api/caja/resumen/:sesionId', allowAdminOrCashier, requireSede, async (
     const sessionId = Number(req.params.sesionId);
     if (!sessionId) return res.status(400).json({ error: 'sesionId invalido' });
     try {
+        if (!(await puedeOperarSesion(pool, req, sessionId))) return res.status(403).json({ error: CAJA_AJENA });
         const summary = await buildCashSessionSummary(pool, sessionId, sedeOf(req));
         if (!summary) return res.status(404).json({ error: 'Sesion no encontrada' });
         res.json(summary);
@@ -1277,6 +1381,12 @@ app.get('/api/caja/sesiones', allowAdminOrCashier, requireSede, async (req, res)
     const params = [sedeOf(req), desde, hasta];
     if (Number(req.query.caja_id)) { conditions.push('s.caja_id = ?'); params.push(Number(req.query.caja_id)); }
     try {
+        const permitidas = await cajasDelUsuario(pool, req);
+        if (permitidas !== null) {
+            if (permitidas.length === 0) return res.json({ periodo: { desde, hasta }, sesiones: [] });
+            conditions.push('s.caja_id IN (?)');
+            params.push(permitidas);
+        }
         const [rows] = await pool.query(
             `SELECT s.id, s.caja_id, ${(await sesionesConTurno()) ? 's.turno,' : ''} c.descripcion AS caja_descripcion, s.estado, s.fecha_apertura, s.fecha_cierre, s.monto_inicial,
                     s.monto_teorico_cierre, s.monto_contado_cierre, s.diferencia,
@@ -1299,6 +1409,7 @@ app.get('/api/caja/sesiones/:id/informe', allowAdminOrCashier, requireSede, asyn
     const sessionId = Number(req.params.id);
     if (!sessionId) return res.status(400).json({ error: 'Sesion invalida' });
     try {
+        if (!(await puedeOperarSesion(pool, req, sessionId))) return res.status(403).json({ error: CAJA_AJENA });
         const informe = await armarInformeCaja(pool, sessionId, sedeOf(req));
         if (!informe) return res.status(404).json({ error: 'Sesion no encontrada' });
         res.json(informe);
@@ -1334,6 +1445,10 @@ app.post('/api/caja/movimiento-manual', allowAdminOrCashier, requireSede, async 
         }
 
         const session = sessionRows[0];
+        if (!(await puedeOperarCaja(connection, req, session.caja_id))) {
+            await connection.rollback();
+            return res.status(403).json({ error: CAJA_AJENA });
+        }
         if (session.estado !== 'abierta') {
             await connection.rollback();
             return res.status(409).json({ error: 'La sesion ya esta cerrada' });
@@ -1378,6 +1493,10 @@ app.post('/api/caja/cierre', allowAdminOrCashier, requireSede, async (req, res) 
         if (!summary) {
             await connection.rollback();
             return res.status(404).json({ error: 'Sesion no encontrada' });
+        }
+        if (!(await puedeOperarCaja(connection, req, summary.caja_id))) {
+            await connection.rollback();
+            return res.status(403).json({ error: CAJA_AJENA });
         }
         if (summary.estado !== 'abierta') {
             await connection.rollback();
@@ -1425,6 +1544,10 @@ app.post('/api/cajas/:id/movimientos', allowAdminOrCashier, requireSede, async (
         if (cajaRows.length === 0) {
             await connection.rollback();
             return res.status(404).json({ error: 'Caja no encontrada' });
+        }
+        if (!(await puedeOperarCaja(connection, req, caja_id))) {
+            await connection.rollback();
+            return res.status(403).json({ error: CAJA_AJENA });
         }
 
         const [activeSessionRows] = await connection.query(
@@ -1741,6 +1864,30 @@ const descontarStockVenta = async (connection, sedeId, pedidoId, referencia, usu
 };
 
 const setSupplyStock = (connection, sedeId, insumoId, stock) => setStockSede(connection, 'insumo', sedeId, insumoId, stock, 'compras');
+
+/**
+ * Costo promedio ponderado de un insumo o producto (bebida) ante una entrada con costo, sobre el stock de todos los almacenes
+ * tomado ANTES de que la entrada sume. Se guarda con 4 decimales: un insumo comprado por kg y llevado en gramos cuesta
+ * fracciones de centimo (S/ 12.50 el kg = S/ 0.0125 el g) y con 2 decimales el promedio se distorsionaba en cada compra.
+ * Devuelve el nuevo costo, o null si no aplica (sin cantidad o costo, o productos sin columna de costo).
+ */
+const actualizarCostoPromedio = async (connection, tipoItem, itemId, cantidad, costo) => {
+    if (!(Number(cantidad) > 0) || !(Number(costo) >= 0) || costo === null) return null;
+    if (tipoItem === 'producto' && !tieneCostoProducto) return null;
+    const [total] = await connection.query(tipoItem === 'insumo'
+        ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
+        : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
+    const [actual] = await connection.query(`SELECT costo_unitario FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} WHERE id = ? FOR UPDATE`, [itemId]);
+    const previo = Math.max(0, Number(total[0]?.stock || 0));
+    const costoPrevio = Number(actual[0]?.costo_unitario || 0);
+    // Sin stock previo (o sin costo previo registrado) el costo es el de la entrada.
+    const promedio = previo > 0 && costoPrevio > 0
+        ? ((previo * costoPrevio) + (Number(cantidad) * Number(costo))) / (previo + Number(cantidad))
+        : Number(costo);
+    const redondeado = Math.round(promedio * 10000) / 10000;
+    await connection.query(`UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`, [redondeado, itemId]);
+    return redondeado;
+};
 
 const adjustSupplyStock = async (connection, sedeId, insumoId, delta, almacenId = null) => adjustStockAlmacen(
     connection, 'insumo', almacenId || await almacenPorDefecto(connection, sedeId, 'compras'), sedeId, insumoId, delta
@@ -2189,7 +2336,7 @@ app.post('/api/compras', allowAdminKitchenForWrites, requireSede, async (req, re
                 const { factor, entero } = await unidadDeLinea(connection, 'insumo', insumoRows[0], item.unidad_id, insumoRows[0].nombre);
                 if (entero && !Number.isInteger(cantidadStock)) throw httpError(400, `${insumoRows[0].nombre} se compra en unidades enteras`);
                 cantidadStock = Math.round(cantidadStock * factor * 1000) / 1000;
-                costoStock = Math.round((costoStock / factor) * 100) / 100;
+                costoStock = Math.round((costoStock / factor) * 10000) / 10000;
                 unidadCompraId = item.unidad_id ? Number(item.unidad_id) : insumoRows[0].unidad_id;
             }
             await connection.query(
@@ -2205,25 +2352,14 @@ app.post('/api/compras', allowAdminKitchenForWrites, requireSede, async (req, re
                 [almacenIngresoId, sedeId, tipoItem, itemId, cantidad, `Compra #${compraId}`, req.userContext.id,
                     ...(conKardex ? [referenciaCompra, costoUnitario, Math.round(costoUnitario * cantidad * 100) / 100] : [])]
             );
+            // Costo promedio ponderado (insumos y bebidas) antes de sumar el stock de la compra.
             if (item.producto_id) {
+                await actualizarCostoPromedio(connection, 'producto', item.producto_id, Number(item.cantidad), Number(item.precio_unitario));
                 await adjustProductStock(connection, sedeId, item.producto_id, Number(item.cantidad), almacenIngresoId);
                 await registrarIngresoCompra('producto', item.producto_id, Number(item.cantidad), Number(item.precio_unitario));
             } else if (item.insumo_id) {
-                // Weighted average cost over the stock of the supply in every warehouse, taken before this purchase enters.
-                const [totales] = await connection.query(
-                    'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ? FOR UPDATE', [item.insumo_id]
-                );
-                const [actual] = await connection.query('SELECT costo_unitario FROM insumos WHERE id = ?', [item.insumo_id]);
-                const previo = Math.max(0, Number(totales[0].stock));
-                const costoPrevio = Number(actual[0]?.costo_unitario || 0);
-                const promedio = previo > 0 && cantidadStock > 0
-                    ? ((previo * costoPrevio) + (cantidadStock * costoStock)) / (previo + cantidadStock)
-                    : costoStock;
+                await actualizarCostoPromedio(connection, 'insumo', item.insumo_id, cantidadStock, costoStock);
                 await adjustSupplyStock(connection, sedeId, item.insumo_id, cantidadStock, almacenIngresoId);
-                await connection.query(
-                    'UPDATE insumos SET costo_unitario = ? WHERE id = ?',
-                    [Math.round(promedio * 100) / 100, item.insumo_id]
-                );
                 await registrarIngresoCompra('insumo', item.insumo_id, cantidadStock, costoStock);
             }
         }
@@ -3450,11 +3586,16 @@ const upsertCliente = async (connection, cliente) => {
     return result.insertId;
 };
 
-/** Open session of the sede; with `cajaId` it is that register's own session (each caja is independent). */
-const openCashSession = async (connection, sedeId, cajaId = null) => {
+/**
+ * Open session of the sede; with `cajaId` it is that register's own session (each caja is independent).
+ * `permitidas` (ids de cajas del usuario, o null = todas) evita que un cajero venda en una caja que no es suya.
+ */
+const openCashSession = async (connection, sedeId, cajaId = null, permitidas = null) => {
+    if (permitidas !== null && (cajaId ? !permitidas.includes(Number(cajaId)) : permitidas.length === 0)) return null;
+    const filtro = cajaId ? 'AND caja_id = ?' : permitidas !== null ? 'AND caja_id IN (?)' : '';
     const [rows] = await connection.query(
-        `SELECT id FROM caja_sesiones WHERE sede_id = ? AND estado = 'abierta' ${cajaId ? 'AND caja_id = ?' : ''} ORDER BY fecha_apertura DESC LIMIT 1 FOR UPDATE`,
-        cajaId ? [sedeId, cajaId] : [sedeId]
+        `SELECT id FROM caja_sesiones WHERE sede_id = ? AND estado = 'abierta' ${filtro} ORDER BY fecha_apertura DESC LIMIT 1 FOR UPDATE`,
+        cajaId ? [sedeId, cajaId] : permitidas !== null ? [sedeId, permitidas] : [sedeId]
     );
     return rows[0]?.id || null;
 };
@@ -3743,7 +3884,9 @@ app.post('/api/facturas', allowAdminOrCashier, requireSede, async (req, res) => 
             throw new FacturacionError(400, `Una boleta desde S/ ${BOLETA_LIMITE_ANONIMO} debe identificar al cliente (DNI)`);
         }
 
-        let sesionId = await openCashSession(connection, sedeId, cajaId);
+        const cajasPermitidas = await cajasDelUsuario(connection, req);
+        if (cajaId && cajasPermitidas !== null && !cajasPermitidas.includes(cajaId)) throw new FacturacionError(403, CAJA_AJENA);
+        let sesionId = await openCashSession(connection, sedeId, cajaId, cajasPermitidas);
         if (condicion === 'contado' && metodo === 'efectivo' && !sesionId) {
             throw new FacturacionError(409, cajaId
                 ? 'La caja seleccionada no esta abierta (Facturacion > Arqueo de Caja)'
@@ -5624,7 +5767,7 @@ const MANTENIMIENTO_SELECT_SQL = `
            m.plan_id, mp.nombre AS plan_nombre, mp.frecuencia_dias, m.tipo, m.estado, m.prioridad,
            DATE_FORMAT(m.fecha_programada, '%Y-%m-%d') AS fecha_programada,
            (m.estado = 'programado' AND m.fecha_programada < CURDATE()) AS vencido,
-           m.descripcion, m.reportado_por, ur.nombre AS reportado_por_nombre, m.diagnostico, m.trabajo_realizado, m.tecnico,
+           m.descripcion, m.reportado_por, ur.nombre AS reportado_por_nombre, (m.reportado_por IS NOT NULL) AS es_falla, m.diagnostico, m.trabajo_realizado, m.tecnico,
            m.proveedor_id, pr.razon_social AS proveedor_nombre, m.fecha_inicio,
            DATE_FORMAT(m.fecha_ejecucion, '%Y-%m-%d') AS fecha_ejecucion, m.costo_material, m.costo_servicio,
            ROUND(m.costo_material + m.costo_servicio, 2) AS costo_total, m.gasto_id,
@@ -6002,7 +6145,7 @@ app.get('/api/mantenimientos', allowAnyProfile, async (req, res) => {
     try {
         const [mantenimientos] = await pool.query(
             `${MANTENIMIENTO_SELECT_SQL} WHERE ${conditions.join(' AND ')}
-             ORDER BY ${vista === 'historial' ? 'COALESCE(m.fecha_ejecucion, m.fecha_programada) DESC' : "m.estado = 'en_ejecucion' DESC, m.fecha_programada ASC, FIELD(m.prioridad, 'alta', 'media', 'baja')"}, m.id`,
+             ORDER BY ${vista === 'historial' ? 'COALESCE(m.fecha_ejecucion, m.fecha_programada) DESC' : "(m.reportado_por IS NOT NULL AND m.estado = 'programado') DESC, m.estado = 'en_ejecucion' DESC, FIELD(m.prioridad, 'alta', 'media', 'baja'), m.fecha_programada ASC"}, m.id`,
             params
         );
         const resumen = mantenimientos.reduce((acc, m) => {
@@ -6011,11 +6154,28 @@ app.get('/api/mantenimientos', allowAnyProfile, async (req, res) => {
             if (m.estado === 'en_ejecucion') acc.en_ejecucion += 1;
             if (Number(m.vencido)) acc.vencidos += 1;
             if (m.tipo === 'correctivo' && MANTENIMIENTO_ACTIVOS.includes(m.estado)) acc.averias_abiertas += 1;
+            if (Number(m.es_falla) && MANTENIMIENTO_ACTIVOS.includes(m.estado)) acc.fallas_reportadas += 1;
             if (m.estado === 'ejecutado') { acc.ejecutados += 1; acc.costo_total += Number(m.costo_total); }
             return acc;
-        }, { cantidad: 0, programados: 0, en_ejecucion: 0, vencidos: 0, averias_abiertas: 0, ejecutados: 0, costo_total: 0 });
+        }, { cantidad: 0, programados: 0, en_ejecucion: 0, vencidos: 0, averias_abiertas: 0, fallas_reportadas: 0, ejecutados: 0, costo_total: 0 });
         resumen.costo_total = roundMoney(resumen.costo_total);
         res.json({ vista, periodo: startDate ? { desde: startDate, hasta: endDate } : null, sede_id: sedeFilter, resumen, mantenimientos });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Fallas reportadas aun abiertas (programadas o en ejecucion) de la sede: aviso en la campana del administrador.
+app.get('/api/mantenimientos/fallas-abiertas', allowAnyProfile, async (req, res) => {
+    if (req.userContext.base !== 'administrador') return res.json({ total: 0, fallas: [] });
+    const sedeId = sedeOf(req);
+    try {
+        const [fallas] = await pool.query(
+            `${MANTENIMIENTO_SELECT_SQL} WHERE m.reportado_por IS NOT NULL AND m.estado IN ('programado', 'en_ejecucion')${sedeId ? ' AND m.sede_id = ?' : ''}
+             ORDER BY FIELD(m.prioridad, 'alta', 'media', 'baja'), m.creado_en DESC LIMIT 50`,
+            sedeId ? [sedeId] : []
+        );
+        res.json({ total: fallas.length, fallas });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -6765,17 +6925,8 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
                     const costo = costoIngresado === null ? null : Math.round((costoIngresado / linea.factor) * 10000) / 10000;
                     if ((tipoItem === 'insumo' || tieneCostoProducto) && costo > 0) {
                         costoUnitario = costo;
-                        // Weighted average over the stock of the item in every warehouse, before this entry.
-                        const [total] = await connection.query(tipoItem === 'insumo'
-                            ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
-                            : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
-                        const previo = Math.max(0, Number(total[0].stock));
-                        const promedio = previo > 0 ? ((previo * Number(catalogo[0].costo_unitario || 0)) + (cantidad * costo)) / (previo + cantidad) : costo;
-                        // Supplies keep the cost with 2 decimals; products with 4 (a litre of beer costs a few cents per ml).
-                        await connection.query(
-                            `UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`,
-                            [tipoItem === 'insumo' ? round2(promedio) : Math.round(promedio * 10000) / 10000, itemId]
-                        );
+                        // Weighted average over the stock of the item in every warehouse, before this entry (4 decimals).
+                        await actualizarCostoPromedio(connection, tipoItem, itemId, cantidad, costo);
                     }
                 }
             }
@@ -8577,6 +8728,33 @@ const asegurarVersion2 = async () => {
     tieneRecordatorioPagos = true;
 };
 
+/**
+ * Observaciones del cliente (nov. 2026). Idempotente: crea o cambia solo lo que falta.
+ *   - insumos.costo_unitario con 4 decimales (costo promedio por gramo / mililitro).
+ *   - caja_usuarios: usuarios asignados a cada caja (varios, por turno).
+ */
+const asegurarObservacionesNov2026 = async () => {
+    const [costo] = await pool.query(
+        "SELECT NUMERIC_SCALE AS escala, NUMERIC_PRECISION AS precision_total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'insumos' AND COLUMN_NAME = 'costo_unitario'"
+    );
+    if (costo[0] && (Number(costo[0].escala) < 4 || Number(costo[0].precision_total) < 12)) {
+        await pool.query('ALTER TABLE insumos MODIFY costo_unitario DECIMAL(12,4) DEFAULT 0');
+        console.log('insumos.costo_unitario ahora con 4 decimales');
+    }
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS caja_usuarios (
+            caja_id INT NOT NULL,
+            usuario_id INT NOT NULL,
+            creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (caja_id, usuario_id),
+            KEY idx_caja_usuarios_usuario (usuario_id),
+            CONSTRAINT fk_cajausr_caja FOREIGN KEY (caja_id) REFERENCES cajas(id) ON DELETE CASCADE,
+            CONSTRAINT fk_cajausr_usuario FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    tieneCajaUsuarios = true;
+};
+
 const iniciar = () => app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     permisos.iniciar();
@@ -8584,9 +8762,10 @@ const iniciar = () => app.listen(PORT, () => {
     asegurarStockDecimal().catch((err) => console.error('No se pudo preparar el stock decimal de productos:', err.message));
     asegurarClientesActivo().catch((err) => console.error('No se pudo preparar clientes.activo:', err.message));
     asegurarVersion2().catch((err) => console.error('No se pudieron preparar las tablas de la version 2:', err.message));
+    asegurarObservacionesNov2026().catch((err) => console.error('No se pudieron preparar las cajas por usuario / costos:', err.message));
     personal.asegurarEsquema().catch((err) => console.error('No se pudieron preparar las tablas de Personal:', err.message));
     cargarUnidadesSunat().catch((err) => console.error('No se pudo cargar el catalogo de unidades:', err.message));
     setTimeout(sincronizarSunatPendientes, 15000).unref();
     setInterval(sincronizarSunatPendientes, SUNAT_SYNC_INTERVAL_MS).unref(); });
 if (require.main === module) iniciar();
-module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, asegurarClientesActivo, asegurarVersion2, cargarUnidadesSunat, personal };
+module.exports = { app, iniciar, asegurarDescuentos, asegurarStockDecimal, asegurarClientesActivo, asegurarVersion2, asegurarObservacionesNov2026, cargarUnidadesSunat, personal };
