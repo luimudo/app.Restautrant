@@ -114,16 +114,12 @@ export const exportarCostos = async (sede, data) => {
         { label: 'Área', width: 16, cell: (r) => t(r.area) },
         { label: 'Cargo', width: 18, cell: (r) => t(r.cargo) },
         { label: 'Estado', width: 11, cell: (r) => t(ESTADO_LABEL[r.estado] || r.estado) },
-        { label: 'EPP', width: 12, cell: (r) => s(r.costo_epp) },
-        { label: 'Uniformes', width: 12, cell: (r) => s(r.costo_uniforme) },
-        { label: 'Total EPP y uniforme', width: 20, cell: (r) => s(r.costo_total) }
+        { label: 'Costo total EPP y uniforme', width: 24, cell: (r) => s(r.costo_total) }
     ];
     const colsA = [
         { label: 'Área', width: 18, cell: (r) => t(r.area) },
         { label: 'Trabajadores', width: 13, cell: (r) => n(r.trabajadores) },
-        { label: 'EPP', width: 12, cell: (r) => s(r.costo_epp) },
-        { label: 'Uniformes', width: 12, cell: (r) => s(r.costo_uniforme) },
-        { label: 'Total EPP y uniforme', width: 20, cell: (r) => s(r.costo_total) }
+        { label: 'Costo total EPP y uniforme', width: 24, cell: (r) => s(r.costo_total) }
     ];
     const hoja = (nombre, cols, filas) => ({
         sheet: nombre,

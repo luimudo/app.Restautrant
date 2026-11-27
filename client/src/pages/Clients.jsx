@@ -66,7 +66,42 @@ const Clients = () => {
         setShowModal(true);
     };
 
+    // Consulta RENIEC (DNI) / SUNAT (RUC) para llenar la ficha, como en el sistema de Bebidas.
+    const [consultando, setConsultando] = useState(false);
+    const [consultaMsg, setConsultaMsg] = useState('');
+    const consultarDocumento = async () => {
+        const numero = String(formData.documento || '').trim();
+        const tipo = formData.tipo_documento || (/^\d{8}$/.test(numero) ? 'DNI' : /^\d{11}$/.test(numero) ? 'RUC' : '');
+        setFormError('');
+        setConsultaMsg('');
+        if (!['DNI', 'RUC'].includes(tipo) || !(tipo === 'DNI' ? /^\d{8}$/ : /^\d{11}$/).test(numero)) {
+            setFormError('Para consultar ingrese un DNI de 8 dígitos o un RUC de 11 dígitos.');
+            return;
+        }
+        const existente = clients.find(c => String(c.documento || '') === numero && c.id !== editingId);
+        if (existente) {
+            setFormError(`Ya existe un cliente con ese documento: ${existente.nombre} (#${existente.id}).`);
+            return;
+        }
+        setConsultando(true);
+        try {
+            const res = await fetch(`/api/clientes/buscar?doc_tipo=${tipo}&doc_numero=${numero}&guardar=0`);
+            const data = await leerError(res, 'No se pudo consultar el documento.');
+            if (!res.ok) {
+                setFormError(data.error || 'No se pudo consultar el documento.');
+                return;
+            }
+            setFormData(prev => ({ ...prev, tipo_documento: tipo, nombre: data.nombre || prev.nombre, direccion: data.direccion || prev.direccion }));
+            setConsultaMsg(data.origen === 'registrado' ? 'Datos tomados de un cliente ya registrado.' : `Datos obtenidos de ${data.origen}. Revise y guarde la ficha.`);
+        } catch {
+            setFormError('No se pudo consultar el documento. Ingrese los datos manualmente.');
+        } finally {
+            setConsultando(false);
+        }
+    };
+
     const cerrarModal = () => {
+        setConsultaMsg('');
         setShowModal(false);
         setEditingId(null);
         setFormData(FORM_VACIO);
@@ -375,14 +410,29 @@ const Clients = () => {
                                     </div>
                                     <div>
                                         <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Documento</label>
-                                        <input
-                                            type="text"
-                                            className="input"
-                                            placeholder="8 o 11 dígitos"
-                                            value={formData.documento}
-                                            onChange={e => setFormData({ ...formData, documento: e.target.value })}
-                                        />
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="text"
+                                                className="input"
+                                                placeholder="8 o 11 dígitos"
+                                                value={formData.documento}
+                                                onChange={e => setFormData({ ...formData, documento: e.target.value.trim() })}
+                                                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); consultarDocumento(); } }}
+                                            />
+                                            <button
+                                                type="button"
+                                                title="Consultar RENIEC / SUNAT"
+                                                onClick={consultarDocumento}
+                                                disabled={consultando}
+                                                className="btn btn-secondary px-3 shrink-0"
+                                            >
+                                                {consultando ? <div className="w-4 h-4 border-2 border-brand-200 border-t-brand-600 rounded-full animate-spin"></div> : <Search size={16} />}
+                                            </button>
+                                        </div>
                                     </div>
+                                    {consultaMsg && (
+                                        <p className="md:col-span-2 -mt-3 text-xs font-bold text-green-700">{consultaMsg}</p>
+                                    )}
                                     <div>
                                         <label className="block text-[10px] font-black uppercase tracking-[0.2em] text-[var(--text-muted)] mb-2 ml-1">Teléfono</label>
                                         <div className="flex">

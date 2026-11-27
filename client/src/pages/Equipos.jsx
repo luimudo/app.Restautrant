@@ -164,10 +164,21 @@ const Equipos = () => {
         }
     };
 
+    // Fallas reportadas sin atender: aviso arriba de la pantalla (y la campana, por el evento).
+    const [fallas, setFallas] = useState({ total: 0, fallas: [] });
+    const cargarFallas = useCallback(() => {
+        fetch('/api/mantenimientos/fallas-abiertas').then((r) => (r.ok ? r.json() : { total: 0, fallas: [] }))
+            .then((d) => setFallas({ total: Number(d.total) || 0, fallas: Array.isArray(d.fallas) ? d.fallas : [] }))
+            .catch(() => {});
+    }, []);
+    useEffect(() => { cargarFallas(); }, [cargarFallas, activeSedeId]);
+
     // After any change: reload the visible tab and the open equipment sheet.
     const afterChange = (text, equipoId) => {
         notify(text);
         refresh();
+        cargarFallas();
+        window.dispatchEvent(new Event('equipos:fallas'));
         if (hojaVida && (!equipoId || hojaVida.id === equipoId)) openHojaVida(hojaVida.id);
     };
 
@@ -239,6 +250,30 @@ const Equipos = () => {
             {message && <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">{message}</div>}
             {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-semibold">{error}</div>}
 
+            {fallas.total > 0 && (
+                <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 flex flex-col sm:flex-row sm:items-center gap-3" role="alert">
+                    <AlertTriangle size={22} className="text-rose-600 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <p className="font-black text-rose-800">{fallas.total} falla(s) reportada(s) sin atender</p>
+                        <ul className="text-sm text-rose-700 mt-1 space-y-0.5">
+                            {fallas.fallas.slice(0, 3).map((m) => (
+                                <li key={m.id} className="truncate">
+                                    <span className="font-bold">{m.equipo_nombre}</span> · prioridad {m.prioridad}
+                                    {' · '}{String(m.descripcion || '').replace(/^Falla reportada:\s*/, '')}
+                                    {m.reportado_por_nombre ? ` (reportó ${m.reportado_por_nombre})` : ''}
+                                </li>
+                            ))}
+                            {fallas.total > 3 && <li className="text-xs">y {fallas.total - 3} más…</li>}
+                        </ul>
+                    </div>
+                    {tab !== 'pendientes' && (
+                        <button type="button" className="btn btn-secondary text-sm shrink-0" onClick={() => { setMessage(''); setTab('pendientes'); }}>
+                            Ver fallas
+                        </button>
+                    )}
+                </div>
+            )}
+
             <div className="flex flex-wrap gap-2">
                 {tabs.map((t) => (
                     <button key={t.key} onClick={() => { setMessage(''); setTab(t.key); }} aria-pressed={tab === t.key}
@@ -303,6 +338,11 @@ const Equipos = () => {
                                             <td className="px-5 py-4">
                                                 <p className="font-semibold">{e.nombre}</p>
                                                 <p className="text-xs text-gray-500 font-mono">{e.codigo}{e.serie ? ` · S/N ${e.serie}` : ''}</p>
+                                                {Number(e.fallas_abiertas) > 0 && (
+                                                    <p className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-black uppercase tracking-widest">
+                                                        <AlertTriangle size={12} /> Falla reportada{Number(e.fallas_abiertas) > 1 ? ` (${e.fallas_abiertas})` : ''}
+                                                    </p>
+                                                )}
                                             </td>
                                             <td className="px-5 py-4 text-sm"><p className="font-semibold">{AREAS[e.area]}</p><p className="text-xs text-gray-500">{CATEGORIAS[e.categoria]}{e.almacen_nombre ? ` · ${e.almacen_nombre}` : ''}</p></td>
                                             <td className="px-5 py-4 text-sm">{[e.marca, e.modelo].filter(Boolean).join(' · ') || <span className="text-gray-400">—</span>}

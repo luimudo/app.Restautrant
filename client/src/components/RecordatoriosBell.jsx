@@ -38,7 +38,9 @@ const RecordatoriosBell = ({ recordatorios = true, fallas: conFallas = false }) 
         load();
         const timer = setInterval(load, REFRESH_MS);
         window.addEventListener('focus', load);
-        return () => { clearInterval(timer); window.removeEventListener('focus', load); };
+        // Equipos avisa al reportar, ejecutar o anular una falla: la campana se actualiza al instante.
+        window.addEventListener('equipos:fallas', load);
+        return () => { clearInterval(timer); window.removeEventListener('focus', load); window.removeEventListener('equipos:fallas', load); };
     }, [load]);
 
     useEffect(() => {

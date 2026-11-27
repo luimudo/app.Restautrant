@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Package, Search, AlertTriangle, ArrowUpRight, Coffee, Beer, Database, Plus, Edit2, Trash2, X, Save, Download, Tags, Check, Ruler } from 'lucide-react';
+import { Package, Search, AlertTriangle, ArrowUpRight, Coffee, Beer, Database, Plus, Edit2, Trash2, X, Save, Download, Tags, Check, Ruler, Calculator } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
@@ -9,6 +9,7 @@ import { Modal, Field, ErrorBox } from '../components/billing/billingShared';
 import { readJson } from '../components/billing/billingUtils';
 import MovimientosInventario from '../components/inventory/MovimientosInventario';
 import UnidadesModal from '../components/inventory/UnidadesModal';
+import RecalculoCostosModal from '../components/inventory/RecalculoCostosModal';
 import { useUnidades } from '../hooks/useUnidades';
 
 const Inventory = () => {
@@ -16,6 +17,9 @@ const Inventory = () => {
     const { activeUser } = useAuth();
     const { unidades, activas: unidadesActivas, conversiones, recargar: recargarUnidades } = useUnidades(!!activeUser);
     const [showUnidades, setShowUnidades] = useState(false);
+    // Recalculo del costo promedio desde el kardex: solo administrador (el servidor tambien lo exige).
+    const esAdministrador = activeUser?.perfil === 'superadmin' || activeUser?.base === 'administrador';
+    const [showRecalculo, setShowRecalculo] = useState(false);
     const [insumos, setInsumos] = useState([]);
     const [productosBar, setProductosBar] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -81,9 +85,13 @@ const Inventory = () => {
             if (res.ok) {
                 setShowModal(false);
                 fetchData();
+            } else {
+                const data = await res.json().catch(() => ({}));
+                alert(data.error || 'No se pudo guardar el insumo.');
             }
         } catch (error) {
             console.error('Error saving insumo:', error);
+            alert('No se pudo guardar el insumo.');
         }
     };
 
@@ -245,6 +253,11 @@ const Inventory = () => {
                                 </button>
                             </>
                         )}
+                        {esAdministrador && tab !== 'movimientos' && (
+                            <button type="button" onClick={() => setShowRecalculo(true)} className="btn btn-secondary flex items-center gap-2">
+                                <Calculator size={18} /> Recalcular costos
+                            </button>
+                        )}
                         <button type="button" onClick={exportarReporte} disabled={exporting} className="btn btn-secondary flex items-center gap-2">
                             <Download size={18} /> {exporting ? 'Generando...' : 'Excel'}
                         </button>
@@ -328,7 +341,7 @@ const Inventory = () => {
                                                 <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <button
                                                         onClick={() => {
-                                                            setCurrentItem(item);
+                                                            setCurrentItem({ ...item, unidad_original_id: item.unidad_id || null, costo_unitario_original: item.costo_unitario ?? null, stock_actual_original: item.stock_actual ?? null });
                                                             setShowModal(true);
                                                         }}
                                                         className="p-2 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-xl transition-all"
@@ -445,6 +458,9 @@ const Inventory = () => {
                                             {!currentItem.unidad_id && <option value="">{currentItem.unidad_medida || 'Unidad'}</option>}
                                             {unidadesActivas.map((u) => <option key={u.id} value={u.id}>{u.nombre} ({u.abreviatura})</option>)}
                                         </select>
+                                        {currentItem.id && currentItem.unidad_original_id && String(currentItem.unidad_id) !== String(currentItem.unidad_original_id) && (
+                                            <p className="text-[11px] font-semibold text-amber-700 ml-1">Al guardar, el stock de todos los almacenes y el costo promedio se convierten a la nueva unidad (se ignoran el costo y stock escritos aquí).</p>
+                                        )}
                                     </div>
                                     <div className="space-y-2">
                                         <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] ml-1">Costo Unitario (S/)</label>
@@ -463,6 +479,7 @@ const Inventory = () => {
                                     <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] ml-1">Stock Inicial</label>
                                     <input
                                         type="number"
+                                        step="0.001"
                                         className="input"
                                         value={currentItem.stock_actual}
                                         onChange={(e) => setCurrentItem({ ...currentItem, stock_actual: e.target.value })}
@@ -484,6 +501,12 @@ const Inventory = () => {
             document.body
             )}
 
+            {showRecalculo && (
+                <RecalculoCostosModal
+                    onClose={() => setShowRecalculo(false)}
+                    onDone={(mensaje) => { setShowRecalculo(false); alert(mensaje); fetchData(); }}
+                />
+            )}
             {showUnidades && (
                 <UnidadesModal
                     unidades={unidades}

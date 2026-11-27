@@ -1,4 +1,4 @@
-# INFORME DE ALCANCE
+                                                                                                                                                                                                                                                                                                                                    # INFORME DE ALCANCE
 ## Contraste entre la Propuesta «Cealka Digital Intelligence Restaurant» y lo efectivamente implementado
 
 **Documento de referencia:** `Cealka_Digital_Intelligence_Restaurant.pdf` — Propuesta Técnica y Económica CONECTA-IA (11 slides).

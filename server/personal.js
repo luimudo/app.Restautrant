@@ -732,13 +732,22 @@ const costos = async (req) => {
          ORDER BY area, trabajador`,
         params
     );
-    const trabajadores = rows.map((r) => {
+    const filas = rows.map((r) => {
         const fila = { ...r, cantidad: Number(r.cantidad), costo_epp: Number(r.costo_epp), costo_uniforme: Number(r.costo_uniforme) };
         fila.costo_total = redondear(fila.costo_epp + fila.costo_uniforme);
         return fila;
     });
+    // Una sola fila por trabajador (si cambio de area, sus entregas se suman; las areas se listan juntas).
+    const trabajadores = [];
+    for (const f of filas) {
+        const t = trabajadores.find((x) => x.personal_id === f.personal_id);
+        if (!t) { trabajadores.push({ ...f }); continue; }
+        if (!String(t.area).split(' / ').includes(f.area)) t.area = `${t.area} / ${f.area}`;
+        for (const k of ['cantidad', 'costo_epp', 'costo_uniforme', 'costo_total']) t[k] = redondear(t[k] + f[k]);
+    }
+    trabajadores.sort((a, b) => String(a.trabajador).localeCompare(String(b.trabajador), 'es'));
     const areas = [];
-    for (const f of trabajadores) {
+    for (const f of filas) {
         let a = areas.find((x) => x.area === f.area);
         if (!a) areas.push(a = { area_id: f.area_id, area: f.area, trabajadores: 0, cantidad: 0, costo_epp: 0, costo_uniforme: 0, costo_total: 0 });
         a.trabajadores += 1;

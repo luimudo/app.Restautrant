@@ -731,6 +731,8 @@ app.get('/api/clientes/buscar', allowAdminWaiterCashier, async (req, res) => {
         const nombre = String((tipo === 'RUC' ? datos.razon_social : datos.full_name) || '').trim();
         const direccion = tipo === 'RUC' ? String(datos.direccion || '').trim() : '';
         if (!nombre) return res.status(404).json({ error: 'No se encontro informacion para ese documento. Ingrese el nombre manualmente.' });
+        // ?guardar=0 (pantalla Clientes): solo devuelve los datos para llenar la ficha; el registro lo hace el usuario al guardar.
+        if (req.query.guardar === '0') return res.json({ origen: tipo === 'RUC' ? 'SUNAT' : 'RENIEC', cliente_id: null, nombre, direccion });
         const [insertado] = await pool.query('INSERT INTO clientes (nombre, documento, tipo_documento, direccion) VALUES (?, ?, ?, ?)', [nombre.slice(0, 200), numero, tipo, direccion.slice(0, 255) || null]);
         res.json({ origen: tipo === 'RUC' ? 'SUNAT' : 'RENIEC', cliente_id: insertado.insertId, nombre, direccion });
     } catch (err) {
@@ -751,6 +753,11 @@ app.get('/api/clientes/:id', allowAnyProfile, async (req, res) => {
 app.post('/api/clientes', allowAdminWaiterCashier, async (req, res) => {
     const { nombre, telefono, email, documento, tipo_documento: tipoDocumento, direccion } = req.body;
     try {
+        const doc = String(documento ?? '').trim();
+        if (doc) {
+            const [dup] = await pool.query('SELECT id, nombre FROM clientes WHERE documento = ? LIMIT 1', [doc]);
+            if (dup[0]) return res.status(409).json({ error: `Ya existe un cliente con ese documento: ${dup[0].nombre} (#${dup[0].id})` });
+        }
         const [result] = await pool.query(
             'INSERT INTO clientes (nombre, telefono, email, documento, tipo_documento, direccion) VALUES (?, ?, ?, ?, ?, ?)',
             [nombre, telefono, email, documento, ['DNI', 'RUC', 'CE', 'PAS'].includes(tipoDocumento) ? tipoDocumento : null, direccion || null]
@@ -1874,9 +1881,11 @@ const setSupplyStock = (connection, sedeId, insumoId, stock) => setStockSede(con
 const actualizarCostoPromedio = async (connection, tipoItem, itemId, cantidad, costo) => {
     if (!(Number(cantidad) > 0) || !(Number(costo) >= 0) || costo === null) return null;
     if (tipoItem === 'producto' && !tieneCostoProducto) return null;
+    // Solo el stock positivo de cada almacen: un almacen en negativo (se vendio antes de registrar la compra) no "resta"
+    // el stock valorizado de los demas. Antes SUM(stock) con un almacen en -10 y otro en +10 daba 0 y el costo se reemplazaba.
     const [total] = await connection.query(tipoItem === 'insumo'
-        ? 'SELECT COALESCE(SUM(stock_actual), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
-        : 'SELECT COALESCE(SUM(stock), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
+        ? 'SELECT COALESCE(SUM(GREATEST(stock_actual, 0)), 0) AS stock FROM stock_insumos WHERE insumo_id = ?'
+        : 'SELECT COALESCE(SUM(GREATEST(stock, 0)), 0) AS stock FROM stock_productos WHERE producto_id = ?', [itemId]);
     const [actual] = await connection.query(`SELECT costo_unitario FROM ${tipoItem === 'insumo' ? 'insumos' : 'productos'} WHERE id = ? FOR UPDATE`, [itemId]);
     const previo = Math.max(0, Number(total[0]?.stock || 0));
     const costoPrevio = Number(actual[0]?.costo_unitario || 0);
@@ -1887,6 +1896,76 @@ const actualizarCostoPromedio = async (connection, tipoItem, itemId, cantidad, c
     const redondeado = Math.round(promedio * 10000) / 10000;
     await connection.query(`UPDATE ${tipoItem === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`, [redondeado, itemId]);
     return redondeado;
+};
+
+/**
+ * Recalculo del costo promedio desde el kardex (funcion pura, se prueba sin base de datos).
+ * Recorre los movimientos de un item en orden, con el stock de cada almacen: cada entrada con costo promedia sobre el
+ * stock positivo de todos los almacenes, igual que actualizarCostoPromedio. El stock que no esta en el kardex (stock
+ * inicial cargado a mano) se deduce del stock actual y entra sin costo conocido: no pesa en el promedio.
+ *   movimientos: [{ almacen_id, cantidad, costo_unitario }] en orden; stockActual: Map almacen_id -> stock de hoy.
+ * Devuelve { costo, entradas, stockInicial } o null si el item no tiene entradas con costo.
+ */
+const recalcularCostoDesdeKardex = (movimientos, stockActual) => {
+    const stock = new Map();
+    for (const m of movimientos) stock.set(Number(m.almacen_id), (stock.get(Number(m.almacen_id)) || 0) + Number(m.cantidad));
+    // Stock inicial de cada almacen = stock de hoy - todo lo movido en el kardex.
+    let stockInicial = 0;
+    const saldo = new Map();
+    for (const id of new Set([...stock.keys(), ...stockActual.keys()])) {
+        const inicial = Math.round(((Number(stockActual.get(id)) || 0) - (stock.get(id) || 0)) * 1000) / 1000;
+        saldo.set(id, inicial);
+        if (inicial > 0) stockInicial += inicial;
+    }
+    let costo = 0;
+    let entradas = 0;
+    for (const m of movimientos) {
+        const id = Number(m.almacen_id);
+        const cantidad = Number(m.cantidad);
+        const cu = m.costo_unitario === null || m.costo_unitario === undefined ? null : Number(m.costo_unitario);
+        if (cantidad > 0 && cu !== null && cu > 0) {
+            const previo = [...saldo.values()].reduce((acc, s) => acc + Math.max(0, s), 0);
+            costo = previo > 0 && costo > 0 ? ((previo * costo) + (cantidad * cu)) / (previo + cantidad) : cu;
+            entradas += 1;
+        }
+        saldo.set(id, (saldo.get(id) || 0) + cantidad);
+    }
+    if (entradas === 0) return null;
+    return { costo: Math.round(costo * 10000) / 10000, entradas, stockInicial: Math.round(stockInicial * 1000) / 1000 };
+};
+
+/** Items (insumos y bebidas) cuyo costo guardado no coincide con el recalculado desde el kardex. */
+const diferenciasCostoPromedio = async (connection) => {
+    const tipos = tieneCostoProducto ? ['insumo', 'producto'] : ['insumo'];
+    const resultado = [];
+    for (const tipo of tipos) {
+        const { table, column, amount } = STOCK_TABLES[tipo];
+        const [items] = await connection.query(tipo === 'insumo'
+            ? 'SELECT i.id, i.nombre, i.costo_unitario, COALESCE(um.abreviatura, i.unidad_medida) AS unidad FROM insumos i LEFT JOIN unidades_medida um ON um.id = i.unidad_id'
+            : "SELECT p.id, p.nombre, p.costo_unitario, COALESCE(um.abreviatura, 'Und') AS unidad FROM productos p LEFT JOIN unidades_medida um ON um.id = p.unidad_id");
+        const [movs] = await connection.query(
+            'SELECT item_id, almacen_id, cantidad, costo_unitario FROM inventario_movimientos WHERE tipo_item = ? ORDER BY id', [tipo]);
+        const [stocks] = await connection.query(`SELECT ${column} AS item_id, almacen_id, ${amount} AS stock FROM ${table}`);
+        const movsDe = new Map();
+        for (const m of movs) {
+            if (!movsDe.has(m.item_id)) movsDe.set(m.item_id, []);
+            movsDe.get(m.item_id).push(m);
+        }
+        const stockDe = new Map();
+        for (const s of stocks) {
+            if (!stockDe.has(s.item_id)) stockDe.set(s.item_id, new Map());
+            stockDe.get(s.item_id).set(Number(s.almacen_id), Number(s.stock));
+        }
+        for (const item of items) {
+            const r = recalcularCostoDesdeKardex(movsDe.get(item.id) || [], stockDe.get(item.id) || new Map());
+            if (!r) continue;
+            const actual = Math.round(Number(item.costo_unitario || 0) * 10000) / 10000;
+            if (Math.abs(actual - r.costo) < 0.0001) continue;
+            resultado.push({ tipo_item: tipo, item_id: item.id, nombre: item.nombre, unidad: item.unidad, costo_actual: actual,
+                costo_recalculado: r.costo, entradas: r.entradas, stock_inicial_sin_costo: r.stockInicial });
+        }
+    }
+    return resultado.sort((a, b) => Math.abs(b.costo_recalculado - b.costo_actual) - Math.abs(a.costo_recalculado - a.costo_actual));
 };
 
 const adjustSupplyStock = async (connection, sedeId, insumoId, delta, almacenId = null) => adjustStockAlmacen(
@@ -2225,11 +2304,26 @@ app.put('/api/insumos/:id', allowAdminKitchenForWrites, requireSede, async (req,
         await connection.beginTransaction();
         const categoriaId = await categoriaInsumoValida(connection, req.body.categoria_id);
         const unidad = await resolverUnidad(connection, req.body);
+        const [previoRows] = await connection.query('SELECT unidad_id, costo_unitario FROM insumos WHERE id = ? FOR UPDATE', [req.params.id]);
+        if (!previoRows[0]) throw httpError(404, 'Insumo no encontrado');
+        // Cambio de unidad (kg -> g): el stock de todos los almacenes y el costo promedio se convierten a la nueva unidad.
+        // Sin conversion el costo por kg quedaba como costo por g y el promedio de las compras siguientes salia mal.
+        // Sin cambio del usuario se conserva el costo de la base (puede haberlo actualizado una compra mientras tanto).
+        let costoFinal = campoEditado(req.body, 'costo_unitario') ? costo_unitario : previoRows[0].costo_unitario;
+        let convertido = false;
+        const unidadAnterior = previoRows[0].unidad_id ? Number(previoRows[0].unidad_id) : null;
+        if (unidadAnterior && unidad.id && unidadAnterior !== Number(unidad.id)) {
+            const factor = await factorConversion(connection, unidadAnterior, unidad.id);
+            if (factor === null) throw httpError(400, `No hay conversion definida entre la unidad anterior y ${unidad.abreviatura}: definala en Unidades de medida antes de cambiar la unidad`);
+            await connection.query('UPDATE stock_insumos SET stock_actual = ROUND(stock_actual * ?, 3) WHERE insumo_id = ?', [factor, req.params.id]);
+            costoFinal = Math.round((Number(previoRows[0].costo_unitario || 0) / factor) * 10000) / 10000;
+            convertido = true;
+        }
         await connection.query(
             'UPDATE insumos SET nombre = ?, unidad_medida = ?, unidad_id = ?, costo_unitario = ?, categoria_id = ? WHERE id = ?',
-            [nombre, unidad.abreviatura, unidad.id, costo_unitario, categoriaId, req.params.id]
+            [nombre, unidad.abreviatura, unidad.id, costoFinal, categoriaId, req.params.id]
         );
-        if (stock_actual !== undefined) {
+        if (campoEditado(req.body, 'stock_actual') && !convertido) {
             await setSupplyStock(connection, sedeOf(req), req.params.id, stock_actual);
         }
         await connection.commit();
@@ -2520,6 +2614,20 @@ const parseFactorVenta = (valor, actual = 1) => {
     return factor;
 };
 
+/**
+ * True when the form changed a value: the screen sends the value it loaded as `<campo>_original`. If it comes back the
+ * same, the user did not touch it and the current value in the database (an average updated by a purchase made while
+ * the screen was open) must not be overwritten. Without `_original` (older clients) any value sent counts as a change.
+ */
+const campoEditado = (body, campo) => {
+    if (body?.[campo] === undefined) return false;
+    const claveOriginal = `${campo}_original`;
+    if (!Object.prototype.hasOwnProperty.call(body, claveOriginal)) return true;
+    const a = body[campo] === null || body[campo] === '' ? null : Number(body[campo]);
+    const b = body[claveOriginal] === null || body[claveOriginal] === '' ? null : Number(body[claveOriginal]);
+    return a !== b;
+};
+
 /** Unit cost of a product typed in the menu form; blank or missing means "leave it as it is" (null). */
 const parseCostoProducto = (valor) => {
     if (valor === undefined || valor === null || valor === '') return null;
@@ -2602,13 +2710,17 @@ app.put('/api/productos/:id', allowAdminKitchenForWrites, requireSede, async (re
         const esPresentacion = enviaBase ? Boolean(productoBaseId) : Boolean(actualRows[0]?.producto_base_id);
         if (esPresentacion) es_receta = 1;
         else await validarBaseConStock(connection, req.params.id, es_receta);
-        if (tieneCostoProducto && costoProducto !== null) await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, req.params.id]);
+        // Costo y stock solo si el usuario los cambio: si no, una pantalla abierta desde antes de una compra devolvia el
+        // costo y el stock viejos y borraba el promedio ponderado de la compra (barril: S/ 13.25 -> S/ 4.50).
+        if (tieneCostoProducto && costoProducto !== null && campoEditado(req.body, 'costo_unitario')) {
+            await connection.query('UPDATE productos SET costo_unitario = ? WHERE id = ?', [costoProducto, req.params.id]);
+        }
         await connection.query(
             `UPDATE productos SET nombre = ?, descripcion = ?, precio = ?, tipo_id = ?, es_receta = ?, disponible = ?, unidad_id = COALESCE(?, unidad_id)${tieneFactorVenta ? ', factor_venta = COALESCE(?, factor_venta)' : ''} WHERE id = ?`,
             [nombre, descripcion, precio, tipo_id, es_receta, disponible, unidad ? unidad.id : null, ...(tieneFactorVenta ? [factorVenta] : []), req.params.id]
         );
         if (enviaBase) await connection.query('UPDATE productos SET producto_base_id = ? WHERE id = ?', [productoBaseId, req.params.id]);
-        if (!esPresentacion) await setProductStock(connection, sedeOf(req), req.params.id, stock);
+        if (!esPresentacion && campoEditado(req.body, 'stock')) await setProductStock(connection, sedeOf(req), req.params.id, stock);
         await connection.commit();
         res.json({ message: 'Producto actualizado' });
     } catch (err) {
@@ -5753,6 +5865,7 @@ const EQUIPO_SELECT_SQL = `
            (SELECT DATE_FORMAT(MIN(m.fecha_programada), '%Y-%m-%d') FROM mantenimientos m
              WHERE m.equipo_id = e.id AND m.estado IN ('programado', 'en_ejecucion')) AS proximo_mantenimiento,
            (SELECT COUNT(*) FROM mantenimientos m WHERE m.equipo_id = e.id AND m.estado IN ('programado', 'en_ejecucion')) AS mantenimientos_pendientes,
+           (SELECT COUNT(*) FROM mantenimientos m WHERE m.equipo_id = e.id AND m.reportado_por IS NOT NULL AND m.estado IN ('programado', 'en_ejecucion')) AS fallas_abiertas,
            (SELECT COALESCE(SUM(m.costo_material + m.costo_servicio), 0) FROM mantenimientos m
              WHERE m.equipo_id = e.id AND m.estado = 'ejecutado') AS costo_mantenimiento
     FROM equipos e
@@ -6165,9 +6278,10 @@ app.get('/api/mantenimientos', allowAnyProfile, async (req, res) => {
     }
 });
 
-// Fallas reportadas aun abiertas (programadas o en ejecucion) de la sede: aviso en la campana del administrador.
+// Fallas reportadas aun abiertas (programadas o en ejecucion) de la sede: aviso en la campana y en Equipos.
+// Las ve el administrador y todo usuario con el modulo Equipos (asi quien reporta tambien sigue su falla hasta que se atienda).
 app.get('/api/mantenimientos/fallas-abiertas', allowAnyProfile, async (req, res) => {
-    if (req.userContext.base !== 'administrador') return res.json({ total: 0, fallas: [] });
+    if (req.userContext.base !== 'administrador' && !req.userContext.modulos?.has('equipment')) return res.json({ total: 0, fallas: [] });
     const sedeId = sedeOf(req);
     try {
         const [fallas] = await pool.query(
@@ -6946,6 +7060,39 @@ app.post('/api/inventario/movimientos/lote', allowAdmin, async (req, res) => {
     } catch (err) {
         await connection.rollback();
         sendAlmacenError(res, err);
+    } finally {
+        connection.release();
+    }
+});
+
+// Recalculo del costo promedio desde el kardex: vista previa (solo lectura) y aplicacion de los items elegidos.
+// Corrige costos pisados por pantallas abiertas desde antes de una compra o redondeados a 2 decimales antes de nov. 2026.
+app.get('/api/inventario/recalculo-costos', allowAdmin, async (req, res) => {
+    try {
+        if (!(await movimientosConCostos())) return res.status(503).json({ error: 'El kardex aun no guarda costos: reinicie la aplicacion' });
+        res.json(await diferenciasCostoPromedio(pool));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/inventario/recalculo-costos', allowAdmin, async (req, res) => {
+    const elegidos = Array.isArray(req.body?.items) ? req.body.items : [];
+    const claves = new Set(elegidos.map((i) => `${i.tipo_item}:${Number(i.item_id)}`));
+    if (claves.size === 0) return res.status(400).json({ error: 'Seleccione al menos un item para corregir' });
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        // Se recalcula en el servidor (no se confia en el valor enviado) y solo se corrigen los items elegidos.
+        const diferencias = (await diferenciasCostoPromedio(connection)).filter((d) => claves.has(`${d.tipo_item}:${d.item_id}`));
+        for (const d of diferencias) {
+            await connection.query(`UPDATE ${d.tipo_item === 'insumo' ? 'insumos' : 'productos'} SET costo_unitario = ? WHERE id = ?`, [d.costo_recalculado, d.item_id]);
+        }
+        await connection.commit();
+        res.json({ message: `${diferencias.length} costo(s) corregido(s)`, corregidos: diferencias });
+    } catch (err) {
+        await connection.rollback();
+        res.status(500).json({ error: err.message });
     } finally {
         connection.release();
     }

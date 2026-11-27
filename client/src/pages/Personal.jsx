@@ -1121,28 +1121,25 @@ const CostosTab = ({ opciones, sede, setError }) => {
                     <div key={a.area} className="card p-4">
                         <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">{a.area} · {a.trabajadores} trab.</p>
                         <p className="text-2xl font-display font-black text-brand-600 tabular-nums">{money(a.costo_total)}</p>
-                        <p className="text-xs text-gray-500">EPP {money(a.costo_epp)} · Uniformes {money(a.costo_uniforme)}</p>
                     </div>
                 ))}
             </div>
 
-            <Tabla minWidth={760} head={<>
-                <Th>Trabajador</Th><Th>Área / cargo</Th><Th right>EPP</Th><Th right>Uniformes</Th><Th right>Total EPP y uniforme</Th>
+            <Tabla minWidth={620} head={<>
+                <Th>Trabajador</Th><Th>Área / cargo</Th><Th right>Costo total EPP y uniforme</Th>
             </>}>
-                {loading && <Vacio cols={5} text="Calculando..." />}
+                {loading && <Vacio cols={3} text="Calculando..." />}
                 {!loading && (data?.trabajadores || []).map((t) => (
-                    <tr key={`${t.personal_id}-${t.area_id}`} className="border-b border-gray-100">
+                    <tr key={t.personal_id} className="border-b border-gray-100">
                         <td className="px-4 py-3"><p className="font-bold">{t.trabajador}</p><p className="text-xs text-gray-500">DNI {t.dni} · {ESTADO_LABEL[t.estado]}</p></td>
                         <td className="px-4 py-3"><p>{t.area}</p><p className="text-xs text-gray-500">{t.cargo || '—'}</p></td>
-                        <td className="px-4 py-3 text-right tabular-nums">{money(t.costo_epp)}</td>
-                        <td className="px-4 py-3 text-right tabular-nums">{money(t.costo_uniforme)}</td>
                         <td className="px-4 py-3 text-right tabular-nums font-black">{money(t.costo_total)}</td>
                     </tr>
                 ))}
-                {!loading && data?.trabajadores?.length === 0 && <Vacio cols={5} text="Ningún trabajador tiene uniformes o EPP vigentes con esos filtros." />}
+                {!loading && data?.trabajadores?.length === 0 && <Vacio cols={3} text="Ningún trabajador tiene uniformes o EPP vigentes con esos filtros." />}
                 {!loading && data?.trabajadores?.length > 0 && (
                     <tr className="bg-gray-50 font-black">
-                        <td className="px-4 py-3" colSpan={4}>Total</td>
+                        <td className="px-4 py-3" colSpan={2}>Total</td>
                         <td className="px-4 py-3 text-right tabular-nums">{money(total)}</td>
                     </tr>
                 )}

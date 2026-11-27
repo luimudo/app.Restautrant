@@ -126,7 +126,8 @@ const MenuManagement = () => {
     };
 
     const openEditProduct = (product) => {
-        setCurrentProduct({ ...product, producto_base_id: product.producto_base_id || '' });
+        // *_original: el servidor solo cambia costo y stock si el usuario los edito (no pisa lo que actualizo una compra).
+        setCurrentProduct({ ...product, producto_base_id: product.producto_base_id || '', costo_unitario_original: product.costo_unitario ?? null, stock_original: product.stock ?? null });
         setImageData('');
         setImagePreview(product.imagen_url || '');
         setRemoveImage(false);
@@ -154,7 +155,7 @@ const MenuManagement = () => {
             const res = await fetch(`/api/productos/${producto.id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ...producto, disponible: !producto.disponible })
+                body: JSON.stringify({ ...producto, disponible: !producto.disponible, costo_unitario_original: producto.costo_unitario ?? null, stock_original: producto.stock ?? null })
             });
             if (!res.ok) {
                 const result = await res.json().catch(() => ({}));
