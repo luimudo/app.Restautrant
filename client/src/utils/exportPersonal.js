@@ -44,6 +44,9 @@ export const exportarTrabajadores = (sede, filas, conRemuneracion) => descargar(
     { label: 'Correo', width: 24, cell: (r) => t(r.email) },
     { label: 'Dirección', width: 30, cell: (r) => t(r.direccion) },
     { label: 'Contacto de emergencia', width: 24, cell: (r) => t([r.contacto_emergencia, r.telefono_emergencia].filter(Boolean).join(' · ')) },
+    { label: 'Talla polo/camisa', width: 12, cell: (r) => t(r.talla_polo) },
+    { label: 'Talla pantalón', width: 12, cell: (r) => t(r.talla_pantalon) },
+    { label: 'Talla calzado', width: 12, cell: (r) => t(r.talla_calzado) },
     { label: 'Usuario del sistema', width: 18, cell: (r) => t(r.usuario_nombre) },
     { label: 'Documentos', width: 11, cell: (r) => n(r.adjuntos) },
     { label: 'Estado', width: 11, cell: (r) => t(ESTADO_LABEL[r.estado] || r.estado) }

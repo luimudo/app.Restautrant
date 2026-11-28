@@ -110,6 +110,9 @@ const asegurarEsquema = async () => {
         telefono_emergencia VARCHAR(40) NULL,
         usuario_id INT NULL,
         estado VARCHAR(15) NOT NULL DEFAULT 'activo',
+        talla_polo VARCHAR(20) NULL,
+        talla_pantalon VARCHAR(20) NULL,
+        talla_calzado VARCHAR(20) NULL,
         observacion VARCHAR(2000) NULL,
         usuario_registro_id INT NULL,
         creado_en DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -254,6 +257,7 @@ const asegurarEsquema = async () => {
  * Observaciones del cliente (nov. 2026), idempotente:
  *   - funciones pasa de codigos fijos (VARCHAR) a texto libre (TEXT); los codigos antiguos se convierten a texto ("Mozo, Caja").
  *   - devoluciones y bajas: epp_devoluciones.tipo y epp_entregas.baja (saldo vigente = cantidad - devuelta - baja).
+ *   - tallas del trabajador (polo/camisa, pantalon, calzado) como referencia al entregar uniforme, igual que el sistema concesionario.
  */
 const actualizarEsquema = async () => {
     const tipoColumna = async (tablaNombre, col) => {
@@ -280,6 +284,12 @@ const actualizarEsquema = async () => {
     if (!(await tipoColumna('epp_entregas', 'baja'))) {
         await pool.query('ALTER TABLE epp_entregas ADD COLUMN baja DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER devuelta');
         console.log('epp_entregas.baja agregado');
+    }
+    for (const col of ['talla_polo', 'talla_pantalon', 'talla_calzado']) {
+        if (!(await tipoColumna('personal', col))) {
+            await pool.query(`ALTER TABLE personal ADD COLUMN ${col} VARCHAR(20) NULL AFTER estado`);
+            console.log(`personal.${col} agregado`);
+        }
     }
 };
 
@@ -356,6 +366,9 @@ const parseTrabajador = (body, req) => {
         telefono_emergencia: texto(body?.telefono_emergencia, 40),
         usuario_id: idOpcional(body?.usuario_id),
         estado: String(body?.estado || 'activo').toLowerCase(),
+        talla_polo: texto(body?.talla_polo, 20),
+        talla_pantalon: texto(body?.talla_pantalon, 20),
+        talla_calzado: texto(body?.talla_calzado, 20),
         observacion: texto(body?.observacion, 2000)
     };
     const errores = [];

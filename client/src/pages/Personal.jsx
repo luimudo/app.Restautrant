@@ -253,7 +253,20 @@ const TrabajadoresTab = ({ opciones, sede, avisar, setError }) => {
 const TRABAJADOR_VACIO = {
     dni: '', codigo: '', nombres: '', apellidos: '', fecha_nacimiento: '', fecha_ingreso: '', fecha_cese: '', cargo_id: '', area_id: '', turno_id: '',
     vinculo: 'planilla', ruc: '', sistema_pension: '', cuspp: '', remuneracion: '', funciones: '', telefono: '', email: '', direccion: '',
-    contacto_emergencia: '', telefono_emergencia: '', usuario_id: '', estado: 'activo', observacion: ''
+    contacto_emergencia: '', telefono_emergencia: '', usuario_id: '', estado: 'activo', talla_polo: '', talla_pantalon: '', talla_calzado: '', observacion: ''
+};
+
+// Tallas del trabajador como referencia al entregar uniforme (como el sistema concesionario).
+const TALLAS = [
+    { key: 'talla_polo', label: 'Polo / camisa', corto: 'Polo', patron: /polo|camisa|chaqueta|casaca|chompa|polera|blusa|filipina/i },
+    { key: 'talla_pantalon', label: 'Pantalón', corto: 'Pantalón', patron: /pantal[oó]n|short|buzo/i },
+    { key: 'talla_calzado', label: 'Calzado', corto: 'Calzado', patron: /calzado|zapat|bota|botin|botín|zapatilla/i }
+];
+const tallasTexto = (t) => TALLAS.filter((x) => t?.[x.key]).map((x) => `${x.corto} ${t[x.key]}`).join(' · ');
+const tallaSugerida = (t, elemento) => {
+    if (!t || !elemento) return '';
+    const x = TALLAS.find((k) => k.patron.test(elemento.nombre || ''));
+    return x ? (t[x.key] || '') : '';
 };
 
 const TrabajadorModal = ({ id, inicial, opciones, onClose, onSaved, onDocs }) => {
@@ -363,6 +376,18 @@ const TrabajadorModal = ({ id, inicial, opciones, onClose, onSaved, onDocs }) =>
                             <h5 className="text-xs font-black uppercase tracking-widest text-gray-500 mb-3">Funciones</h5>
                             <textarea className="input min-h-[80px]" maxLength={4000} value={form.funciones} onChange={(e) => set({ funciones: e.target.value })}
                                 placeholder="Describa las funciones del trabajador. Ej.: Atención de mesas del salón, apoyo en caja en el turno tarde." aria-label="Funciones" />
+                        </section>
+
+                        <section>
+                            <h5 className="text-xs font-black uppercase tracking-widest text-gray-500 mb-3">Tallas (uniforme y EPP)</h5>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                {TALLAS.map((x) => (
+                                    <Field key={x.key} label={x.label}>
+                                        <input className="input" maxLength={20} value={form[x.key]} onChange={(e) => set({ [x.key]: e.target.value.toUpperCase() })}
+                                            placeholder={x.key === 'talla_calzado' ? 'Ej. 42' : 'Ej. M'} />
+                                    </Field>
+                                ))}
+                            </div>
                         </section>
 
                         <Field label="Observación"><textarea className="input min-h-[70px]" maxLength={2000} value={form.observacion} onChange={(e) => set({ observacion: e.target.value })} /></Field>
@@ -615,6 +640,13 @@ const EntregaModal = ({ inicial, opciones, trabajadores, onClose, onSaved }) => 
     const set = (patch) => setForm((prev) => ({ ...prev, ...patch }));
     const elemento = elementos.find((e) => String(e.id) === String(form.elemento_id));
     const costo = form.costo_unitario === '' ? Number(elemento?.costo_unitario || 0) : Number(form.costo_unitario);
+    const trabajador = trabajadores.find((t) => String(t.id) === String(form.personal_id));
+    const tallasRef = tallasTexto(trabajador);
+    // Al elegir trabajador o elemento se propone la talla registrada en su ficha (si la talla no fue escrita a mano).
+    const [tallaManual, setTallaManual] = useState(false);
+    useEffect(() => {
+        if (!tallaManual) set({ talla: tallaSugerida(trabajador, elemento) });
+    }, [form.personal_id, form.elemento_id, trabajadores.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const save = async (event) => {
         event.preventDefault();
@@ -647,10 +679,16 @@ const EntregaModal = ({ inicial, opciones, trabajadores, onClose, onSaved }) => 
                         </select>
                     </Field>
                 </div>
+                {trabajador && (
+                    <p className="text-sm rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 px-4 py-2">
+                        <strong>Tallas de referencia:</strong> {tallasRef || 'no registradas en la ficha del trabajador'}
+                    </p>
+                )}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <Field label="Fecha"><input type="date" className="input" max={toPeruYmd()} value={form.fecha} onChange={(e) => set({ fecha: e.target.value })} required /></Field>
                     <Field label={`Cantidad${elemento ? ` (${elemento.unidad})` : ''}`}><input type="number" min="0.01" step="0.01" className="input" value={form.cantidad} onChange={(e) => set({ cantidad: e.target.value })} required /></Field>
-                    <Field label="Talla"><input className="input" maxLength={30} value={form.talla} onChange={(e) => set({ talla: e.target.value })} /></Field>
+                    <Field label="Talla"><input className="input" maxLength={30} value={form.talla} placeholder={tallasRef ? 'Ver referencia' : ''}
+                        onChange={(e) => { setTallaManual(e.target.value !== ''); set({ talla: e.target.value }); }} /></Field>
                     <Field label="Estado">
                         <select className="input" value={form.estado} onChange={(e) => set({ estado: e.target.value })}>
                             {opciones.estados_elemento.map((v) => <option key={v} value={v}>{ESTADO_ELEMENTO_LABEL[v]}</option>)}

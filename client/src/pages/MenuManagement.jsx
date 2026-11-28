@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ChefHat, Plus, Trash2, Edit2, Search, Filter, UtensilsCrossed, Info, Tag, Download, Check, X, Power, Beer } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
@@ -385,9 +386,9 @@ const MenuManagement = () => {
             </div>
 
             {/* Product Modal */}
-            <AnimatePresence>
+            {createPortal(<AnimatePresence>
                 {showProductForm && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto">
                         <motion.div
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
@@ -593,14 +594,14 @@ const MenuManagement = () => {
                         </motion.div>
                     </div>
                 )}
-            </AnimatePresence>
+            </AnimatePresence>, document.body)}
 
             {showConsumo && <ConsumoLitrosModal sedeNombre={activeSede?.nombre} onClose={() => setShowConsumo(false)} />}
 
             {/* Category Modal (Simplified) */}
-            <AnimatePresence>
+            {createPortal(<AnimatePresence>
                 {showCategoryForm && (
-                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4 overflow-y-auto">
                         <motion.div
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
@@ -657,7 +658,7 @@ const MenuManagement = () => {
                         </motion.div>
                     </div>
                 )}
-            </AnimatePresence>
+            </AnimatePresence>, document.body)}
         </div>
     );
 };
